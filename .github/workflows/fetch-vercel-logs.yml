@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   fetch:
-    # Запускаем либо на PR, либо когда упал чек от Vercel
+    # Запускаем либо на PR, либо когда завершился check_run от Vercel со статусом failure
     if: |
       github.event_name == 'pull_request' ||
       (github.event_name == 'check_run' &&
@@ -23,7 +23,7 @@ jobs:
        github.event.check_run.conclusion == 'failure')
     runs-on: ubuntu-latest
     env:
-      VERCEL_TOKEN:   ${{ secrets.VERCEL_TOKEN }}       # Personal token из Vercel
+      VERCEL_TOKEN:   ${{ secrets.VERCEL_TOKEN }}       # Personal Token из Vercel
       VERCEL_PROJECT: ${{ secrets.VERCEL_PROJECT_ID }}  # prj_...
       VERCEL_ORG:     ${{ secrets.VERCEL_ORG_ID }}      # team_...
 
@@ -37,9 +37,7 @@ jobs:
             sudo apt-get update && sudo apt-get install -y jq
           fi
 
-      # Универсально определяем PR и SHA:
-      # - для pull_request: берём прямо из payload
-      # - для check_run: ищем PR по head SHA
+      # Универсально определяем PR и SHA (для PR и для check_run)
       - name: Resolve PR & SHA
         id: ctx
         uses: actions/github-script@v7
@@ -54,7 +52,6 @@ jobs:
             } else {
               const cr = context.payload.check_run;
               sha = cr.head_sha;
-              // найти связанный PR по коммиту
               const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({
                 owner, repo, commit_sha: sha
               });
@@ -64,7 +61,7 @@ jobs:
             core.setOutput('pr', pr || '');
             core.setOutput('sha', sha || '');
 
-      # 1) Если событие от Vercel check_run — попробуем сразу достать dpl_* из details_url
+      # 1) Если событие от Vercel check_run — достаём dpl_* и/или preview host из details_url
       - name: Try get deployment from Vercel check_run
         id: from_check
         if: ${{ github.event_name == 'check_run' }}
@@ -84,14 +81,14 @@ jobs:
             core.setOutput('id', depId);
             core.setOutput('host', host);
 
-      # 2) Если id нет — берём из списка деплоев по meta.githubPrId (для PR)
-      - name: Fallback by PR
+      # 2) Если id нет — ищем деплой по номеру PR
+      - name: Fallback by PR (meta.githubPrId)
         id: dep_by_pr
         if: ${{ steps.from_check.outputs.id == '' }}
         run: |
           PR="${{ steps.ctx.outputs.pr }}"
           if [ -z "$PR" ]; then
-            echo "No PR number in context (likely check_run without associated PR) — skipping PR lookup."
+            echo "No PR in context — skip PR lookup."
             exit 0
           fi
           curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
@@ -101,7 +98,7 @@ jobs:
             echo "id=$DEP_ID" >> $GITHUB_OUTPUT
           fi
 
-      # 3) Если id всё ещё нет, но есть preview host из details_url — ищем по .url
+      # 3) Если id всё ещё нет, но есть preview host — ищем по .url
       - name: Fallback by preview host
         id: dep_by_host
         if: ${{ steps.from_check.outputs.id == '' && steps.from_check.outputs.host != '' && steps.dep_by_pr.outputs.id == '' }}
@@ -114,7 +111,7 @@ jobs:
             echo "id=$DEP_ID" >> $GITHUB_OUTPUT
           fi
 
-      # 4) Финальный выбор id (из check_run → по PR → по host)
+      # 4) Финальный выбор deployment id
       - name: Select deployment id
         id: sel
         run: |
@@ -133,7 +130,7 @@ jobs:
           curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" "$EV_URL" > vercel-events.json
           echo "Events size: $(wc -c < vercel-events.json)"
 
-      # 6) Парсим в текст
+      # 6) Парсим JSON событий в плоский текст
       - name: Parse logs
         id: logs
         run: |
@@ -148,13 +145,14 @@ jobs:
             | ( .text?, .message?, .error?, .error?.message?, (.entries? // [])[]?, (.logs? // [])[]? )
             | strings
           ' vercel-events.json > vercel-build.log || true
+
           if [ -s vercel-build.log ]; then
             tail -n 200 vercel-build.log > tail.txt
           else
             echo "[no events text returned by Vercel API]" > tail.txt
           fi
 
-      # 7) Инфо по деплою
+      # 7) Информация о деплое (url/state)
       - name: Deployment info
         id: info
         run: |
@@ -164,7 +162,19 @@ jobs:
           echo "url=$(jq -r '.url // empty' vercel-deployment.json)"   >> $GITHUB_OUTPUT
           echo "state=$(jq -r '.readyState // empty' vercel-deployment.json)" >> $GITHUB_OUTPUT
 
-      # 8) Публикуем результат в Checks (вкладка Checks)
+      # 8) Короткое резюме прямо в Summary job (видно в Checks → наш job)
+      - name: Add job summary
+        run: |
+          echo "### Vercel Logs (tail 200)" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${{ steps.info.outputs.url }}" ]; then
+            echo "Preview: https://${{ steps.info.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat tail.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # 9) Отдельный чек-ран “Vercel Logs” (появится отдельной строкой в списке Checks)
       - name: Publish check run (Vercel Logs)
         if: ${{ steps.ctx.outputs.sha != '' }}
         uses: actions/github-script@v7
@@ -190,15 +200,21 @@ jobs:
               }
             });
 
-      # 9) Комментарий в PR (если есть PR)
+      # 10) (опционально) комментарий в PR
       - name: Comment to PR
         if: ${{ steps.ctx.outputs.pr != '' }}
         uses: peter-evans/create-or-update-comment@v4
         with:
           issue-number: ${{ steps.ctx.outputs.pr }}
-          body-file: tail.txt
+          body: |
+            🔗 Deployment: `${{ steps.sel.outputs.id }}` — state: **${{ steps.info.outputs.state }}**
+            ${{ steps.info.outputs.url != '' && 'Preview: https://' || '' }}${{ steps.info.outputs.url }}
+            **Tail (200 lines):**
+            ```
+            ${{ steps.info.outputs.state }}
+            ```
 
-      # 10) Артефакты для отладки
+      # 11) Артефакты для отладки
       - name: Upload raw
         if: always()
         uses: actions/upload-artifact@v4
