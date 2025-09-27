@@ -1,0 +1,24 @@
+{
+  "name": "build-test",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JenyaL/build-test.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/JenyaL/build-test/issues"
+  },
+  "homepage": "https://github.com/JenyaL/build-test#readme",
+  "dependencies": {
+    "dotenv": "^17.2.2"
+  }
+}
