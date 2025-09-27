@@ -29,6 +29,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Ensure jq present
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y jq
+          fi
+
+      - name: Validate required env
+        shell: bash
+        run: |
+          set -e
+          test -n "${VERCEL_TOKEN}"   || { echo "ERROR: VERCEL_TOKEN is empty (check repo Secrets)"; exit 1; }
+          test -n "${VERCEL_PROJECT}" || { echo "ERROR: VERCEL_PROJECT_ID is empty (check repo Secrets)"; exit 1; }
+          test -n "${VERCEL_ORG}"     || { echo "ERROR: VERCEL_ORG_ID (teamId) is empty (check repo Secrets)"; exit 1; }
+          echo "VERCEL_TOKEN length: ${#VERCEL_TOKEN}"
+          echo "VERCEL_PROJECT: ${VERCEL_PROJECT}"
+          echo "VERCEL_ORG (teamId): ${VERCEL_ORG}"
+
       - name: Resolve PR number and SHA
         id: ctx
         shell: bash
@@ -74,34 +91,52 @@ jobs:
             exit 0
           fi
 
+          # pull recent preview deployments
           curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
             "https://api.vercel.com/v6/deployments?projectId=$VERCEL_PROJECT&target=preview&limit=50" \
-            > deployments.json
+            -w "\nHTTP_CODE:%{http_code}\n" -D dep_headers.txt -o deployments.json
 
-          DEP_ID=$(jq -r --arg PR "${{ steps.ctx.outputs.pr }}" \
-            '.deployments[] | select(.meta.githubPrId == $PR) | .uid' deployments.json | head -n1)
+          echo "First 200 chars of /v6 body:"; head -c 200 deployments.json || true; echo
+          CODE=$(grep HTTP_CODE deployments.txt 2>/dev/null | cut -d: -f2) || true
+
+          # Try to match PR → SHA → latest
+          DEP_ID=$(jq -r --arg PR "${{ steps.ctx.outputs.pr }}" '.deployments[]? | select(.meta.githubPrId == $PR) | .uid' deployments.json | head -n1)
           if [ -z "$DEP_ID" ] || [ "$DEP_ID" = "null" ]; then
-            DEP_ID=$(jq -r --arg SHA "${{ steps.ctx.outputs.sha }}" \
-              '.deployments[] | select(.meta.githubCommitSha == $SHA) | .uid' deployments.json | head -n1)
+            DEP_ID=$(jq -r --arg SHA "${{ steps.ctx.outputs.sha }}" '.deployments[]? | select(.meta.githubCommitSha == $SHA) | .uid' deployments.json | head -n1)
           fi
           if [ -z "$DEP_ID" ] || [ "$DEP_ID" = "null" ]; then
-            DEP_ID=$(jq -r '.deployments[0].uid' deployments.json)
+            DEP_ID=$(jq -r '.deployments[0]?.uid' deployments.json)
           fi
-          if [ -z "$DEP_ID" ] || [ "$DEP_ID" = "null" ]; then
-            echo "No deployment found"; exit 1
-          fi
+
+          test -n "$DEP_ID" && [ "$DEP_ID" != "null" ] || { echo "ERROR: No deployment found"; exit 1; }
           echo "id=$DEP_ID" >> $GITHUB_OUTPUT
+          echo "Using deployment: $DEP_ID"
 
-      - name: Fetch deployment events
+      - name: Fetch deployment events (with HTTP code)
+        id: ev
         shell: bash
         run: |
+          set -e
           EV_URL="https://api.vercel.com/v2/deployments/${{ steps.dep.outputs.id }}/events?teamId=${{ env.VERCEL_ORG }}&limit=1000"
           echo "GET $EV_URL"
-          curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" "$EV_URL" > vercel-events.json
-          echo "Events file size (bytes): $(wc -c < vercel-events.json)"
+          curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
+            "$EV_URL" \
+            -w "\nHTTP_CODE:%{http_code}\n" \
+            -D events_headers.txt \
+            -o vercel-events.json || true
+
+          echo "Events HTTP status:"
+          head -n 1 events_headers.txt || true
+          echo "Events file size (bytes): $(wc -c < vercel-events.json || echo 0)"
           echo "Events JSON head (400 chars):"
-          head -c 400 vercel-events.json || true
-          echo
+          head -c 400 vercel-events.json || true; echo
+
+          CODE=$(tail -n 1 vercel-events.json | sed -n 's/HTTP_CODE://p')
+          # Если тело пустое — CODE не вытащится; проверим отдельно
+          if [ ! -s vercel-events.json ]; then
+            echo "ERROR: vercel-events.json is empty. Check that secrets are valid and teamId is correct."
+            exit 1
+          fi
 
       - name: Parse logs from events
         id: logs
@@ -133,7 +168,7 @@ jobs:
         run: |
           curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
             "https://api.vercel.com/v13/deployments/${{ steps.dep.outputs.id }}?teamId=${{ env.VERCEL_ORG }}" \
-            > vercel-deployment.json
+            -o vercel-deployment.json
           echo "url=$(jq -r '.url // empty' vercel-deployment.json)"   >> $GITHUB_OUTPUT
           echo "state=$(jq -r '.readyState // empty' vercel-deployment.json)" >> $GITHUB_OUTPUT
 
@@ -194,6 +229,7 @@ jobs:
         with:
           name: vercel-raw
           path: |
+            events_headers.txt
             vercel-events.json
             vercel-deployment.json
             vercel-build.log
