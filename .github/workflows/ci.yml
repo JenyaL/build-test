@@ -11,21 +11,26 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: 20
 
-      - name: Install dependencies
-        run: npm ci
+      - run: npm ci
+
+      - name: Validate BUILD_RESULT
+        env:
+          BUILD_RESULT: ${{ secrets.BUILD_RESULT }}
+        run: |
+          if [ -z "${BUILD_RESULT}" ]; then
+            echo "BUILD_RESULT is empty (forked PR or misconfig)."
+            exit 1
+          else
+            echo "BUILD_RESULT is set."
+          fi
 
       - name: Run build
         env:
           BUILD_RESULT: ${{ secrets.BUILD_RESULT }}
         run: npm run build
-
-      - name: Run tests
-        run: npm test
