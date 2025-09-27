@@ -52,7 +52,7 @@ jobs:
                 echo "pr=$PR"  >> $GITHUB_OUTPUT
                 echo "sha=$SHA" >> $GITHUB_OUTPUT
               else
-                # Fallback: just use current commit SHA (allows manual runs from Actions)
+                # Fallback: just use current commit SHA
                 echo "sha=${{ github.sha }}" >> $GITHUB_OUTPUT
               fi
             fi
@@ -68,22 +68,22 @@ jobs:
           test -n "$VERCEL_PROJECT" || { echo "VERCEL_PROJECT_ID is empty"; exit 1; }
           test -n "$VERCEL_ORG"     || { echo "VERCEL_ORG_ID is empty"; exit 1; }
 
-          # Fetch latest preview deployments for this project
+          # Get recent preview deployments
           curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
             "https://api.vercel.com/v6/deployments?projectId=$VERCEL_PROJECT&target=preview&limit=50" \
             > deployments.json
 
-          # 1) Try by PR number (most reliable when GitHub integration is active)
+          # 1) Try by PR number
           DEP_ID=$(jq -r --arg PR "${{ steps.ctx.outputs.pr }}" \
             '.deployments[] | select(.meta.githubPrId == $PR) | .uid' deployments.json | head -n1)
 
-          # 2) If not found, try by commit SHA
+          # 2) Try by commit SHA
           if [ -z "$DEP_ID" ] || [ "$DEP_ID" = "null" ]; then
             DEP_ID=$(jq -r --arg SHA "${{ steps.ctx.outputs.sha }}" \
               '.deployments[] | select(.meta.githubCommitSha == $SHA) | .uid' deployments.json | head -n1)
           fi
 
-          # 3) If still not found, fallback to the most recent preview deployment
+          # 3) Fallback: the most recent preview deployment
           if [ -z "$DEP_ID" ] || [ "$DEP_ID" = "null" ]; then
             DEP_ID=$(jq -r '.deployments[0].uid' deployments.json)
           fi
@@ -94,7 +94,7 @@ jobs:
 
           echo "id=$DEP_ID" >> $GITHUB_OUTPUT
 
-      # Step 3 — Fetch deployment events and convert to plain text log
+      # Step 3 — Fetch deployment events and convert to plain text log (robust extractor)
       - name: Fetch logs (events → text)
         shell: bash
         run: |
@@ -102,10 +102,21 @@ jobs:
             "https://api.vercel.com/v2/deployments/${{ steps.dep.outputs.id }}/events?orgId=$VERCEL_ORG" \
             > vercel-events.json
 
-          # Extract only textual log lines from events (payload.text)
-          jq -r '.events[] | .payload.text // empty' vercel-events.json > vercel-build.log || true
+          # Extract text from various possible fields to avoid empty output
+          jq -r '
+            .events[] |
+            (
+              .payload.text
+              // .payload.error?.message
+              // .payload.error
+              // .payload.message
+              // .message
+              // .text
+              // empty
+            )
+          ' vercel-events.json > vercel-build.log || true
 
-      # Step 4 — Build nice markdown: tail for quick reading + collapsible truncated full log
+      # Step 4 — Build markdown: tail for quick view + collapsible truncated full log
       - name: Prepare markdown (tail + collapsible full)
         id: md
         shell: bash
@@ -141,7 +152,7 @@ jobs:
             echo '```'
           } > summary.md
 
-      # Step 5 — Show preview in PR Checks (Job Summary), no download needed
+      # Step 5 — Show preview in PR Checks (Job Summary)
       - name: Add summary to PR Checks
         run: |
           cat summary.md >> "$GITHUB_STEP_SUMMARY"
@@ -153,12 +164,11 @@ jobs:
         with:
           issue-number: ${{ steps.ctx.outputs.pr }}
           body-file: comment.md
-          # Update the same comment on re-runs instead of spamming new ones
           edit-mode: replace
           search: '<!-- vercel-logs-anchor -->'
           reactions: eyes
 
-      # (Optional) Keep full log as artifact (for download or archival)
+      # Optional — keep the full raw log as artifact
       - name: Upload full log (optional)
         if: always()
         uses: actions/upload-artifact@v4
