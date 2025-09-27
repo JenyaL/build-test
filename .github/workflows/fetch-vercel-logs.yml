@@ -23,12 +23,12 @@ jobs:
     env:
       VERCEL_TOKEN:   ${{ secrets.VERCEL_TOKEN }}
       VERCEL_PROJECT: ${{ secrets.VERCEL_PROJECT_ID }}
-      VERCEL_ORG:     ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_ORG:     ${{ secrets.VERCEL_ORG_ID }}  # team_...
 
     steps:
       - uses: actions/checkout@v4
 
-      # === Resolve PR and SHA ===
+      # --- Resolve PR / SHA ---
       - name: Resolve PR number and SHA
         id: ctx
         shell: bash
@@ -56,7 +56,7 @@ jobs:
             fi
           fi
 
-      # === Use provided deployment_id ===
+      # --- Manual deployment_id takes precedence ---
       - name: Use provided deployment_id if any
         id: dpl_input
         shell: bash
@@ -65,7 +65,7 @@ jobs:
             echo "id=${{ github.event.inputs.deployment_id }}" >> $GITHUB_OUTPUT
           fi
 
-      # === Find deployment if no manual ID ===
+      # --- Find deployment (PR → SHA → latest) if no manual id ---
       - name: Find Vercel deployment
         id: dep
         shell: bash
@@ -94,14 +94,26 @@ jobs:
           fi
           echo "id=$DEP_ID" >> $GITHUB_OUTPUT
 
-      # === Fetch deployment events ===
+      # --- Fetch deployment events ---
       - name: Fetch deployment events
         shell: bash
         run: |
-          URL="https://api.vercel.com/v2/deployments/${{ steps.dep.outputs.id }}/events?teamId=$VERCEL_ORG&limit=1000"
-          curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" "$URL" > vercel-events.json
+          EV_URL="https://api.vercel.com/v2/deployments/${{ steps.dep.outputs.id }}/events?teamId=${{ env.VERCEL_ORG }}&limit=1000"
+          echo "GET $EV_URL"
+          curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" "$EV_URL" > vercel-events.json
 
-      # === Parse logs (array or {events:[]}) ===
+      # --- Debug: show raw events head/size ---
+      - name:
+        Debug: show raw events head
+        shell: bash
+        run: |
+          echo "Size (bytes):"
+          wc -c vercel-events.json || true
+          echo "Head (first 400 chars):"
+          head -c 400 vercel-events.json || true
+          echo
+
+      # --- Parse logs from events (supports [] or {events:[]}) ---
       - name: Parse logs
         id: logs
         shell: bash
@@ -118,22 +130,30 @@ jobs:
             | strings
           ' vercel-events.json > vercel-build.log || true
 
+      # --- Debug: log file stats ---
+      - name:
+        Debug: log file stats
+        shell: bash
+        run: |
           if [ -s vercel-build.log ]; then
-            echo "has_text=true" >> $GITHUB_OUTPUT
+            echo "vercel-build.log has content, tail:"
+            tail -n 20 vercel-build.log || true
+          else
+            echo "vercel-build.log is EMPTY"
           fi
 
-      # === Deployment info (URL & state) ===
+      # --- Deployment info (URL & state) ---
       - name: Deployment info
         id: info
         shell: bash
         run: |
           curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
-            "https://api.vercel.com/v13/deployments/${{ steps.dep.outputs.id }}?teamId=$VERCEL_ORG" \
+            "https://api.vercel.com/v13/deployments/${{ steps.dep.outputs.id }}?teamId=${{ env.VERCEL_ORG }}" \
             > vercel-deployment.json
-          echo "url=$(jq -r '.url' vercel-deployment.json)" >> $GITHUB_OUTPUT
-          echo "state=$(jq -r '.readyState' vercel-deployment.json)" >> $GITHUB_OUTPUT
+          echo "url=$(jq -r '.url // empty' vercel-deployment.json)"   >> $GITHUB_OUTPUT
+          echo "state=$(jq -r '.readyState // empty' vercel-deployment.json)" >> $GITHUB_OUTPUT
 
-      # === Prepare markdown ===
+      # --- Prepare markdown (PR comment + Checks summary) ---
       - name: Prepare markdown
         id: md
         shell: bash
@@ -142,7 +162,7 @@ jobs:
           if [ -s vercel-build.log ]; then
             tail -n ${TAIL_LINES} vercel-build.log > tail.txt
           else
-            echo "[no events text returned by Vercel API]" > tail.txt
+            echo "[no events text returned by Vercel API for this deployment]" > tail.txt
           fi
 
           DEP_ID="${{ steps.dep.outputs.id }}"
@@ -172,11 +192,9 @@ jobs:
             echo '```'
           } > summary.md
 
-      # === Add summary ===
       - name: Add summary to PR Checks
         run: cat summary.md >> "$GITHUB_STEP_SUMMARY"
 
-      # === Comment in PR ===
       - name: Post/Update PR comment
         if: ${{ steps.ctx.outputs.pr != '' }}
         uses: peter-evans/create-or-update-comment@v4
@@ -187,7 +205,7 @@ jobs:
           search: '<!-- vercel-logs-anchor -->'
           reactions: eyes
 
-      # === Upload raw JSON (debug) ===
+      # --- Upload raw for troubleshooting ---
       - name: Upload raw JSON
         if: always()
         uses: actions/upload-artifact@v4
