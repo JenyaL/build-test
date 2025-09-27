@@ -1,10 +1,12 @@
 name: Fetch Vercel Logs (PR + auto on failure)
 
 on:
+  # Run on PR activity and when a Vercel check finishes (to auto-publish logs on failure)
   pull_request:
     types: [opened, synchronize, reopened]
   check_run:
     types: [completed]
+  # Optional manual trigger
   workflow_dispatch: {}
 
 permissions:
@@ -14,7 +16,7 @@ permissions:
 
 jobs:
   fetch:
-    # Запускаем либо на PR, либо когда завершился check_run от Vercel со статусом failure
+    # Run either on PRs or when a failing Vercel check_run completes
     if: |
       github.event_name == 'pull_request' ||
       (github.event_name == 'check_run' &&
@@ -23,21 +25,24 @@ jobs:
        github.event.check_run.conclusion == 'failure')
     runs-on: ubuntu-latest
     env:
-      VERCEL_TOKEN:   ${{ secrets.VERCEL_TOKEN }}       # Personal Token из Vercel
+      # Set these in: Repo → Settings → Secrets and variables → Actions
+      VERCEL_TOKEN:   ${{ secrets.VERCEL_TOKEN }}       # Personal token
       VERCEL_PROJECT: ${{ secrets.VERCEL_PROJECT_ID }}  # prj_...
       VERCEL_ORG:     ${{ secrets.VERCEL_ORG_ID }}      # team_...
 
     steps:
+      # 0) Checkout for convenience (artifacts, summaries)
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 1) Ensure jq is available
       - name: Ensure jq installed
         run: |
           if ! command -v jq >/dev/null 2>&1; then
             sudo apt-get update && sudo apt-get install -y jq
           fi
 
-      # Универсально определяем PR и SHA (для PR и для check_run)
+      # 2) Resolve PR number and head SHA (works for both pull_request and check_run)
       - name: Resolve PR & SHA
         id: ctx
         uses: actions/github-script@v7
@@ -58,10 +63,10 @@ jobs:
               pr = prs.data[0]?.number || null;
             }
 
-            core.setOutput('pr', pr || '');
+            core.setOutput('pr',  pr || '');
             core.setOutput('sha', sha || '');
 
-      # 1) Если событие от Vercel check_run — достаём dpl_* и/или preview host из details_url
+      # 3) If we came from a Vercel check, try to extract dpl_* and/or preview host from details_url
       - name: Try get deployment from Vercel check_run
         id: from_check
         if: ${{ github.event_name == 'check_run' }}
@@ -78,10 +83,10 @@ jobs:
               if (m2) host = m2[1];
             }
             core.info(`details_url: ${url}`);
-            core.setOutput('id', depId);
+            core.setOutput('id',   depId);
             core.setOutput('host', host);
 
-      # 2) Если id нет — ищем деплой по номеру PR
+      # 4) Fallback: find deployment by PR number via Vercel API (meta.githubPrId)
       - name: Fallback by PR (meta.githubPrId)
         id: dep_by_pr
         if: ${{ steps.from_check.outputs.id == '' }}
@@ -98,7 +103,7 @@ jobs:
             echo "id=$DEP_ID" >> $GITHUB_OUTPUT
           fi
 
-      # 3) Если id всё ещё нет, но есть preview host — ищем по .url
+      # 5) Fallback: if we have a preview host from details_url, match by .url
       - name: Fallback by preview host
         id: dep_by_host
         if: ${{ steps.from_check.outputs.id == '' && steps.from_check.outputs.host != '' && steps.dep_by_pr.outputs.id == '' }}
@@ -111,13 +116,13 @@ jobs:
             echo "id=$DEP_ID" >> $GITHUB_OUTPUT
           fi
 
-      # 4) Финальный выбор deployment id
+      # 6) Select a single deployment id from the discovered options
       - name: Select deployment id
         id: sel
         run: |
           echo "id=${{ steps.from_check.outputs.id || steps.dep_by_pr.outputs.id || steps.dep_by_host.outputs.id }}" >> $GITHUB_OUTPUT
 
-      # 5) Тянем события
+      # 7) Fetch deployment events (build logs) from Vercel
       - name: Fetch deployment events
         id: ev
         run: |
@@ -130,7 +135,7 @@ jobs:
           curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" "$EV_URL" > vercel-events.json
           echo "Events size: $(wc -c < vercel-events.json)"
 
-      # 6) Парсим JSON событий в плоский текст
+      # 8) Parse JSON events into plain text (robust extraction of text-like fields)
       - name: Parse logs
         id: logs
         run: |
@@ -146,13 +151,16 @@ jobs:
             | strings
           ' vercel-events.json > vercel-build.log || true
 
+          # Prepare tail (last 200 lines) and a truncated full log (~60k chars for PR)
           if [ -s vercel-build.log ]; then
             tail -n 200 vercel-build.log > tail.txt
+            head -c 60000 vercel-build.log > full_truncated.txt
           else
             echo "[no events text returned by Vercel API]" > tail.txt
+            cp tail.txt full_truncated.txt
           fi
 
-      # 7) Информация о деплое (url/state)
+      # 9) Fetch extra deployment info (preview URL + readyState)
       - name: Deployment info
         id: info
         run: |
@@ -162,7 +170,7 @@ jobs:
           echo "url=$(jq -r '.url // empty' vercel-deployment.json)"   >> $GITHUB_OUTPUT
           echo "state=$(jq -r '.readyState // empty' vercel-deployment.json)" >> $GITHUB_OUTPUT
 
-      # 8) Короткое резюме прямо в Summary job (видно в Checks → наш job)
+      # 10) Add a short summary to the job (visible inside the job’s Summary on Checks tab)
       - name: Add job summary
         run: |
           echo "### Vercel Logs (tail 200)" >> "$GITHUB_STEP_SUMMARY"
@@ -174,7 +182,7 @@ jobs:
           cat tail.txt >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
-      # 9) Отдельный чек-ран “Vercel Logs” (появится отдельной строкой в списке Checks)
+      # 11) Create a dedicated check-run “Vercel Logs” with the tail right in its summary
       - name: Publish check run (Vercel Logs)
         if: ${{ steps.ctx.outputs.sha != '' }}
         uses: actions/github-script@v7
@@ -182,10 +190,10 @@ jobs:
           script: |
             const fs = require('fs');
             const {owner, repo} = context.repo;
-            const sha = '${{ steps.ctx.outputs.sha }}';
-            const depId = '${{ steps.sel.outputs.id }}';
-            const state = '${{ steps.info.outputs.state }}';
-            const url = '${{ steps.info.outputs.url }}';
+            const sha  = '${{ steps.ctx.outputs.sha }}';
+            const dep  = '${{ steps.sel.outputs.id }}';
+            const state= '${{ steps.info.outputs.state }}';
+            const url  = '${{ steps.info.outputs.url }}';
             const tail = fs.readFileSync('tail.txt','utf8');
 
             await github.rest.checks.create({
@@ -196,26 +204,46 @@ jobs:
               conclusion: (state === 'ERROR' ? 'failure' : 'neutral'),
               output: {
                 title: `Vercel Logs (${state || 'unknown'})`,
-                summary: `Deployment: ${depId}\n${url ? `Preview: https://${url}\n` : ''}\n\nLast 200 lines:\n\n\`\`\`\n${tail}\n\`\`\``
+                summary: `Deployment: ${dep}\n${url ? `Preview: https://${url}\n` : ''}\n\nLast 200 lines:\n\n\`\`\`\n${tail}\n\`\`\``
               }
             });
 
-      # 10) (опционально) комментарий в PR
+      # 12) Build a rich PR comment: tail + collapsible full log
+      - name: Build PR comment markdown
+        if: ${{ steps.ctx.outputs.pr != '' }}
+        run: |
+          {
+            echo "🔗 Deployment: \`${{ steps.sel.outputs.id }}\` — state: **${{ steps.info.outputs.state }}**"
+            if [ -n "${{ steps.info.outputs.url }}" ]; then
+              echo
+              echo "Preview: https://${{ steps.info.outputs.url }}"
+            fi
+            echo
+            echo "**Tail (200 lines):**"
+            echo
+            echo '```'
+            cat tail.txt
+            echo '```'
+            echo
+            echo "<details><summary>Show full log (truncated)</summary>"
+            echo
+            echo '```'
+            cat full_truncated.txt
+            echo '```'
+            echo
+            echo "</details>"
+          } > comment.md
+
+      # 13) Post the PR comment
       - name: Comment to PR
         if: ${{ steps.ctx.outputs.pr != '' }}
         uses: peter-evans/create-or-update-comment@v4
         with:
           issue-number: ${{ steps.ctx.outputs.pr }}
-          body: |
-            🔗 Deployment: `${{ steps.sel.outputs.id }}` — state: **${{ steps.info.outputs.state }}**
-            ${{ steps.info.outputs.url != '' && 'Preview: https://' || '' }}${{ steps.info.outputs.url }}
-            **Tail (200 lines):**
-            ```
-            ${{ steps.info.outputs.state }}
-            ```
+          body-file: comment.md
 
-      # 11) Артефакты для отладки
-      - name: Upload raw
+      # 14) Upload raw artifacts for debugging (optional)
+      - name: Upload raw artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -225,3 +253,4 @@ jobs:
             vercel-deployment.json
             vercel-build.log
             tail.txt
+            full_truncated.txt
