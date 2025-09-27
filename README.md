@@ -6,7 +6,7 @@ Test repository for validating builds with **GitHub Actions**.
 * If `BUILD_RESULT=success` → build passes, otherwise it fails.
 * Workflow runs automatically on push and PR.
 
-### 🔧 Local run
+### Local run
 
 ```bash
 npm install
