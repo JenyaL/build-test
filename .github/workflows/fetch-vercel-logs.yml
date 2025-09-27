@@ -1,25 +1,25 @@
 name: Fetch Vercel Logs
 
 on:
-  # This enables the "Run workflow" button in GitHub Actions UI
+  # Enables the "Run workflow" button in GitHub Actions UI
   workflow_dispatch:
     inputs:
       pr:
-        description: 'Pull Request number (optional)'
+        description: "Pull Request number (optional)"
         required: false
       sha:
-        description: 'Commit SHA (optional, overrides PR if set)'
+        description: "Commit SHA (optional, overrides PR if set)"
         required: false
 
 permissions:
   contents: read
-  pull-requests: write   # required to add a comment in PRs
+  pull-requests: write   # to post/update a PR comment
 
 jobs:
   fetch:
     runs-on: ubuntu-latest
     env:
-      # Secrets stored in GitHub → Settings → Secrets and variables → Actions
+      # Set these in: GitHub → Settings → Secrets and variables → Actions
       VERCEL_TOKEN:   ${{ secrets.VERCEL_TOKEN }}
       VERCEL_PROJECT: ${{ secrets.VERCEL_PROJECT_ID }}
       VERCEL_ORG:     ${{ secrets.VERCEL_ORG_ID }}
@@ -27,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Step 1: Resolve PR number and Commit SHA
+      # Step 1 — Resolve PR number and HEAD SHA we want logs for
       - name: Resolve PR number and SHA
         id: ctx
         shell: bash
@@ -37,30 +37,28 @@ jobs:
           PR_INPUT="${{ github.event.inputs.pr }}"
           SHA_INPUT="${{ github.event.inputs.sha }}"
 
-          # If SHA provided manually, use it
           if [ -n "$SHA_INPUT" ]; then
             echo "sha=$SHA_INPUT" >> $GITHUB_OUTPUT
           else
-            # If PR number provided, fetch its HEAD SHA
             if [ -n "$PR_INPUT" ]; then
               SHA=$(gh pr view "$PR_INPUT" --json headRefOid --jq .headRefOid)
               echo "sha=$SHA" >> $GITHUB_OUTPUT
               echo "pr=$PR_INPUT" >> $GITHUB_OUTPUT
             else
-              # Try to find PR automatically by current commit
+              # Try to auto-detect PR by current commit
               PR=$(gh pr list --search "${{ github.sha }}" --json number --jq '.[0].number' || true)
               if [ -n "$PR" ] && [ "$PR" != "null" ]; then
                 SHA=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
                 echo "pr=$PR"  >> $GITHUB_OUTPUT
                 echo "sha=$SHA" >> $GITHUB_OUTPUT
               else
-                # Fallback: just use current commit SHA
+                # Fallback: just use current commit SHA (allows manual runs from Actions)
                 echo "sha=${{ github.sha }}" >> $GITHUB_OUTPUT
               fi
             fi
           fi
 
-      # Step 2: Find latest Vercel deployment for this PR/commit
+      # Step 2 — Find the matching Vercel deployment
       - name: Find Vercel deployment
         id: dep
         shell: bash
@@ -70,29 +68,33 @@ jobs:
           test -n "$VERCEL_PROJECT" || { echo "VERCEL_PROJECT_ID is empty"; exit 1; }
           test -n "$VERCEL_ORG"     || { echo "VERCEL_ORG_ID is empty"; exit 1; }
 
-          # Get list of latest preview deployments for the project
+          # Fetch latest preview deployments for this project
           curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
             "https://api.vercel.com/v6/deployments?projectId=$VERCEL_PROJECT&target=preview&limit=50" \
             > deployments.json
 
-          # Prefer to match by PR number
-          DEP_ID=$(jq -r --arg PR "${{ steps.ctx.outputs.pr }}" '.deployments[]
-                    | select(.meta.githubPrId == $PR) | .uid' deployments.json | head -n1)
+          # 1) Try by PR number (most reliable when GitHub integration is active)
+          DEP_ID=$(jq -r --arg PR "${{ steps.ctx.outputs.pr }}" \
+            '.deployments[] | select(.meta.githubPrId == $PR) | .uid' deployments.json | head -n1)
 
-          # If not found, try to match by commit SHA
+          # 2) If not found, try by commit SHA
           if [ -z "$DEP_ID" ] || [ "$DEP_ID" = "null" ]; then
-            DEP_ID=$(jq -r --arg SHA "${{ steps.ctx.outputs.sha }}" '.deployments[]
-                      | select(.meta.githubCommitSha == $SHA) | .uid' deployments.json | head -n1)
+            DEP_ID=$(jq -r --arg SHA "${{ steps.ctx.outputs.sha }}" \
+              '.deployments[] | select(.meta.githubCommitSha == $SHA) | .uid' deployments.json | head -n1)
           fi
 
-          # If still not found, fail
+          # 3) If still not found, fallback to the most recent preview deployment
           if [ -z "$DEP_ID" ] || [ "$DEP_ID" = "null" ]; then
-            echo "No deployment found for this PR/SHA"; exit 1;
+            DEP_ID=$(jq -r '.deployments[0].uid' deployments.json)
+          fi
+
+          if [ -z "$DEP_ID" ] || [ "$DEP_ID" = "null" ]; then
+            echo "No deployment found (preview target)"; exit 1
           fi
 
           echo "id=$DEP_ID" >> $GITHUB_OUTPUT
 
-      # Step 3: Fetch deployment logs (events) and convert to plain text
+      # Step 3 — Fetch deployment events and convert to plain text log
       - name: Fetch logs (events → text)
         shell: bash
         run: |
@@ -100,45 +102,67 @@ jobs:
             "https://api.vercel.com/v2/deployments/${{ steps.dep.outputs.id }}/events?orgId=$VERCEL_ORG" \
             > vercel-events.json
 
-          # Extract only text log lines from events
+          # Extract only textual log lines from events (payload.text)
           jq -r '.events[] | .payload.text // empty' vercel-events.json > vercel-build.log || true
 
-          # Prepare a short tail for PR comment (last 120 lines)
-          tail -n 120 vercel-build.log > vercel-build-tail.txt || true
+      # Step 4 — Build nice markdown: tail for quick reading + collapsible truncated full log
+      - name: Prepare markdown (tail + collapsible full)
+        id: md
+        shell: bash
+        run: |
+          TAIL_LINES=200
+          tail -n ${TAIL_LINES} vercel-build.log > tail.txt || true
+          head -c 60000 vercel-build.log > full_truncated.txt || true
 
-      # Step 4: Upload full log file as artifact
-      - name: Upload full log
+          {
+            echo "<!-- vercel-logs-anchor -->"
+            echo "❌ Vercel deployment \`${{ steps.dep.outputs.id }}\` failed (or produced logs)."
+            echo
+            echo "**Last ${TAIL_LINES} lines:**"
+            echo
+            echo '```'
+            cat tail.txt 2>/dev/null || true
+            echo '```'
+            echo
+            echo "<details><summary>Show truncated full log (~60k chars)</summary>"
+            echo
+            echo '```'
+            cat full_truncated.txt 2>/dev/null || true
+            echo '```'
+            echo
+            echo "</details>"
+          } > comment.md
+
+          {
+            echo "### Vercel Logs (tail ${TAIL_LINES})"
+            echo
+            echo '```'
+            cat tail.txt 2>/dev/null || true
+            echo '```'
+          } > summary.md
+
+      # Step 5 — Show preview in PR Checks (Job Summary), no download needed
+      - name: Add summary to PR Checks
+        run: |
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      # Step 6 — Post or update a single sticky PR comment with logs
+      - name: Post/Update PR comment
+        if: ${{ steps.ctx.outputs.pr != '' }}
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ steps.ctx.outputs.pr }}
+          body-file: comment.md
+          # Update the same comment on re-runs instead of spamming new ones
+          edit-mode: replace
+          search: '<!-- vercel-logs-anchor -->'
+          reactions: eyes
+
+      # (Optional) Keep full log as artifact (for download or archival)
+      - name: Upload full log (optional)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: vercel-build.log
           path: vercel-build.log
           if-no-files-found: ignore
-
-      # Step 5: Post log tail as a PR comment (only if PR number is known)
-      - name: Comment tail to PR
-        if: ${{ steps.ctx.outputs.pr != '' }}
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const pr = Number('${{ steps.ctx.outputs.pr }}');
-            const dep = '${{ steps.dep.outputs.id }}';
-            let tail = '(no log lines)';
-            try { tail = fs.readFileSync('vercel-build-tail.txt','utf8'); } catch {}
-
-            const body = [
-              `❌ Vercel deployment **${dep}** failed (PR #${pr})`,
-              '',
-              'Last 120 lines:',
-              '```',
-              tail || '(empty)',
-              '```',
-              '📎 Full log attached as artifact (vercel-build.log).'
-            ].join('\n');
-
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: pr,
-              body
-            })
