@@ -89,9 +89,12 @@ jobs:
       # 3) Fetch events JSON
       - name: Fetch events JSON
         run: |
-          curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
-            "https://api.vercel.com/v2/deployments/${{ steps.dep.outputs.id }}/events?orgId=$VERCEL_ORG" \
-            > vercel-events.json
+          set -x
+          URL="https://api.vercel.com/v2/deployments/${{ steps.dep.outputs.id }}/events?orgId=$VERCEL_ORG&limit=1000&since=0"
+          echo "DEPLOYMENT ID: ${{ steps.dep.outputs.id }}"
+          curl -sS -D headers.txt -o vercel-events.json -H "Authorization: Bearer $VERCEL_TOKEN" "$URL" || true
+          echo "--- RESPONSE HEADERS ---"; cat headers.txt || true
+          echo "--- JSON HEAD (first 400 chars) ---"; head -c 400 vercel-events.json || true; echo
 
       # 4) Extract human-readable log lines (robust)
       - name: Build plaintext log from events
