@@ -86,23 +86,44 @@ jobs:
 
           echo "id=$DEP_ID" >> $GITHUB_OUTPUT
 
-      # 3) Fetch events JSON
-      - name: Fetch events JSON
-        run: |
-          set -x
-          URL="https://api.vercel.com/v2/deployments/${{ steps.dep.outputs.id }}/events?orgId=$VERCEL_ORG&limit=1000&since=0"
-          echo "DEPLOYMENT ID: ${{ steps.dep.outputs.id }}"
-          curl -sS -D headers.txt -o vercel-events.json -H "Authorization: Bearer $VERCEL_TOKEN" "$URL" || true
-          echo "--- RESPONSE HEADERS ---"; cat headers.txt || true
-          echo "--- JSON HEAD (first 400 chars) ---"; head -c 400 vercel-events.json || true; echo
-
-      # 4) Extract human-readable log lines (robust)
-      - name: Build plaintext log from events
+      # 3) Fetch events JSON with debug
+      - name: Fetch events JSON (debug)
         shell: bash
         run: |
-          # Try to collect strings from common fields first
+          set -x
+          BASE="https://api.vercel.com"
+          DEP="${{ steps.dep.outputs.id }}"
+          URL_EVENTS="$BASE/v2/deployments/$DEP/events?orgId=$VERCEL_ORG&limit=1000&direction=backward"
+          # иногда помогает since=0
+          URL_EVENTS_SINCE="$URL_EVENTS&since=0"
+
+          # 1st try
+          curl -sS -D headers1.txt -o vercel-events.json -H "Authorization: Bearer $VERCEL_TOKEN" "$URL_EVENTS" || true
+          BYTES=$(wc -c < vercel-events.json | tr -d ' ')
+          echo "events.json size: $BYTES bytes"
+          echo "--- HEADERS #1 ---"; cat headers1.txt || true
+          echo "--- JSON HEAD (first 400 chars) ---"; head -c 400 vercel-events.json || true; echo
+
+          # If empty, 2nd try with since=0
+          if [ "$BYTES" -lt 10 ]; then
+            curl -sS -D headers2.txt -o vercel-events.json -H "Authorization: Bearer $VERCEL_TOKEN" "$URL_EVENTS_SINCE" || true
+            echo "--- HEADERS #2 (since=0) ---"; cat headers2.txt || true
+            echo "--- JSON HEAD (first 400 chars) ---"; head -c 400 vercel-events.json || true; echo
+          fi
+
+          # Save also basic deployment info (sometimes contains .error.message)
+          curl -sS -D headers_dep.txt -o vercel-deployment.json -H "Authorization: Bearer $VERCEL_TOKEN" "$BASE/v13/deployments/$DEP?orgId=$VERCEL_ORG" || true
+          echo "--- DEPLOYMENT HEADERS ---"; cat headers_dep.txt || true
+          echo "--- DEPLOYMENT JSON HEAD (first 400 chars) ---"; head -c 400 vercel-deployment.json || true; echo
+
+      # 4) Build plaintext log from whatever we got
+      - name: Build plaintext log from JSONs
+        shell: bash
+        run: |
+          # Try to extract as much human text as possible from events
           jq -r '
-            .events[] |
+            .events? // [] |
+            .[] |
             (
               .payload? // .
             ) |
@@ -116,27 +137,23 @@ jobs:
               (.logs? // [])[]?
             )
             | strings
-          ' vercel-events.json > vercel-build.log
+          ' vercel-events.json > vercel-build.log || true
 
-          # If still empty, do a recursive scan for any "text"/"message"/"error" string fields
+          # If still empty, fall back to deployment.error.message or raw tails
           if [ ! -s vercel-build.log ]; then
             jq -r '
-              .events[] |
               (
-                [ paths(scalars) as $p
-                  | (getpath($p) | tostring) as $val
-                  | ( ($p|tostring) | test("text|message|error"; "i") ) as $match
-                  | select($match) 
-                  | $val
-                ] | .[]
-              )
-            ' vercel-events.json > vercel-build.log || true
+                .error?.message? // .error? // .readyState? // .state?
+              ) // empty
+            ' vercel-deployment.json > vercel-build.log || true
           fi
 
-          # As a last resort, include the last 1500 chars of raw JSON
           if [ ! -s vercel-build.log ]; then
-            echo "[no known log fields found; dumping tail of raw JSON]" > vercel-build.log
+            echo "[no log lines; dumping tails]" > vercel-build.log
+            echo "--- events tail ---" >> vercel-build.log
             tail -c 1500 vercel-events.json >> vercel-build.log || true
+            echo -e "\n--- deployment tail ---" >> vercel-build.log
+            tail -c 1500 vercel-deployment.json >> vercel-build.log || true
           fi
 
       # 5) Prepare markdown (tail + collapsible truncated full)
