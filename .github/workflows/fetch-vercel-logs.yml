@@ -25,7 +25,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1) Resolve PR/SHA
       - name: Resolve PR number and SHA
         id: ctx
         shell: bash
@@ -54,7 +53,6 @@ jobs:
             fi
           fi
 
-      # 2) Find deployment (PR -> SHA -> latest preview)
       - name: Find Vercel deployment
         id: dep
         shell: bash
@@ -86,7 +84,6 @@ jobs:
 
           echo "id=$DEP_ID" >> $GITHUB_OUTPUT
 
-      # 3) Try primary source: /v2/deployments/{id}/events
       - name: Fetch events JSON (primary)
         id: ev
         shell: bash
@@ -99,14 +96,11 @@ jobs:
           echo "---- /events HEADERS ----"; head -n 5 headers-events.txt || true
           echo "---- /events JSON HEAD (400) ----"; head -c 400 vercel-events.json || true; echo
 
-      # 3b) If /events looks empty, try /builds and then /builds/{buildId}/events
-      - name:
-          Fallback: fetch builds & build events
+      - name:  Fetch builds & build events
         id: bld
         if: ${{ always() }}
         shell: bash
         run: |
-          # Heuristic: treat /events as empty if file is zero-sized OR only has '[]' or '{"events":[]}'
           EMPTY="no"
           if [ ! -s vercel-events.json ]; then EMPTY="yes"; fi
           if grep -q '"events"\s*:\s*\[\s*\]' vercel-events.json 2>/dev/null; then EMPTY="yes"; fi
@@ -118,55 +112,39 @@ jobs:
 
           echo "Primary /events empty → trying /builds … /builds/{buildId}/events"
 
-          # /v2/deployments/{id}/builds
           BURL="https://api.vercel.com/v2/deployments/${{ steps.dep.outputs.id }}/builds?orgId=$VERCEL_ORG"
           curl -sS -D headers-builds.txt -o vercel-builds.json \
             -H "Authorization: Bearer $VERCEL_TOKEN" "$BURL" || true
           echo "---- /builds HEADERS ----"; head -n 5 headers-builds.txt || true
           echo "---- /builds JSON HEAD (400) ----"; head -c 400 vercel-builds.json || true; echo
 
-          # newest buildId
           BUILD_ID=$(jq -r '(.builds // .[])? | (.[0].id // .id // empty)' vercel-builds.json 2>/dev/null || true)
           if [ -z "$BUILD_ID" ] || [ "$BUILD_ID" = "null" ]; then
             echo "No buildId found in /builds"; exit 0
           fi
           echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
 
-          # /v2/deployments/{id}/builds/{buildId}/events
           BEURL="https://api.vercel.com/v2/deployments/${{ steps.dep.outputs.id }}/builds/${BUILD_ID}/events?orgId=$VERCEL_ORG&limit=1000"
           curl -sS -D headers-build-events.txt -o vercel-build-events.json \
             -H "Authorization: Bearer $VERCEL_TOKEN" "$BEURL" || true
           echo "---- /builds/{id}/events HEADERS ----"; head -n 5 headers-build-events.txt || true
           echo "---- /builds/{id}/events JSON HEAD (400) ----"; head -c 400 vercel-build-events.json || true; echo
 
-      # 4) Build plaintext log from whatever we got (events OR build-events)
       - name: Build plaintext log
         shell: bash
         run: |
-          # Prefer the richer source:
           SRC="vercel-events.json"
           if [ -s vercel-build-events.json ]; then SRC="vercel-build-events.json"; fi
 
-          # Extract strings from common fields; if empty, do recursive scan
           jq -r '
             ( .events // .builds // [] ) as $root
             | $root[]
-            | (
-                .payload? // .entry? // .
-              ) |
-              (
-                .text?,
-                .message?,
-                .error?,
-                .error?.message?,
-                (.entries? // [])[]?,
-                (.logs? // [])[]?
-              )
-              | strings
+            | ( .payload? // .entry? // . )
+            | ( .text?, .message?, .error?, .error?.message?, (.entries? // [])[]?, (.logs? // [])[]? )
+            | strings
           ' "$SRC" > vercel-build.log 2>/dev/null || true
 
           if [ ! -s vercel-build.log ]; then
-            # recursive fallback: print any scalar where path name includes text/message/error
             jq -r '
               paths(scalars) as $p
               | ( ($p|tostring) | test("text|message|error"; "i") )
@@ -181,7 +159,6 @@ jobs:
             tail -c 1500 "$SRC" >> vercel-build.log || true
           fi
 
-      # 5) Prepare markdown & summary (как в твоей текущей версии)
       - name: Prepare markdown (tail + collapsible full)
         id: md
         shell: bash
@@ -218,7 +195,8 @@ jobs:
           } > summary.md
 
       - name: Add summary to PR Checks
-        run: cat summary.md >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Post/Update PR comment
         if: ${{ steps.ctx.outputs.pr != '' }}
@@ -230,7 +208,6 @@ jobs:
           search: '<!-- vercel-logs-anchor -->'
           reactions: eyes
 
-      # Keep raw responses to inspect if needed
       - name: Upload raw responses (debug)
         if: always()
         uses: actions/upload-artifact@v4
