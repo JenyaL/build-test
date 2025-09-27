@@ -7,7 +7,7 @@
     "start": "node index.js",
     "build": "node index.js",
     "test": "echo \"No tests yet\""
-  }
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/JenyaL/build-test.git"
