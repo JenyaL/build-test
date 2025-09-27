@@ -89,7 +89,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          URL="https://api.vercel.com/v2/deployments/${{ steps.dep.outputs.id }}/events?orgId=$VERCEL_ORG&limit=1000&since=0"
+          URL="https://api.vercel.com/v2/deployments/${{ steps.dep.outputs.id }}/events?teamId=$VERCEL_ORG&limit=1000&since=0"
           echo "GET $URL"
           curl -sS -D headers-events.txt -o vercel-events.json \
             -H "Authorization: Bearer $VERCEL_TOKEN" "$URL" || true
@@ -112,7 +112,7 @@ jobs:
 
           echo "Primary /events empty → trying /builds … /builds/{buildId}/events"
 
-          BURL="https://api.vercel.com/v2/deployments/${{ steps.dep.outputs.id }}/builds?orgId=$VERCEL_ORG"
+          BURL="https://api.vercel.com/v2/deployments/${{ steps.dep.outputs.id }}/builds?teamId=$VERCEL_ORG"
           curl -sS -D headers-builds.txt -o vercel-builds.json \
             -H "Authorization: Bearer $VERCEL_TOKEN" "$BURL" || true
           echo "---- /builds HEADERS ----"; head -n 5 headers-builds.txt || true
@@ -124,7 +124,7 @@ jobs:
           fi
           echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
 
-          BEURL="https://api.vercel.com/v2/deployments/${{ steps.dep.outputs.id }}/builds/${BUILD_ID}/events?orgId=$VERCEL_ORG&limit=1000"
+          BEURL="https://api.vercel.com/v2/deployments/${{ steps.dep.outputs.id }}/builds/${BUILD_ID}/events?teamId=$VERCEL_ORG&limit=1000"
           curl -sS -D headers-build-events.txt -o vercel-build-events.json \
             -H "Authorization: Bearer $VERCEL_TOKEN" "$BEURL" || true
           echo "---- /builds/{id}/events HEADERS ----"; head -n 5 headers-build-events.txt || true
