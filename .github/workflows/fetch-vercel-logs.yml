@@ -9,6 +9,9 @@ on:
       sha:
         description: "Commit SHA (optional, overrides PR if set)"
         required: false
+      deployment_id:
+        description: "Vercel deployment UID (dpl_*) — overrides PR/SHA"
+        required: false
 
 permissions:
   contents: read
@@ -25,6 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # === Resolve PR and SHA ===
       - name: Resolve PR number and SHA
         id: ctx
         shell: bash
@@ -33,7 +37,6 @@ jobs:
         run: |
           PR_INPUT="${{ github.event.inputs.pr }}"
           SHA_INPUT="${{ github.event.inputs.sha }}"
-
           if [ -n "$SHA_INPUT" ]; then
             echo "sha=$SHA_INPUT" >> $GITHUB_OUTPUT
           else
@@ -53,14 +56,25 @@ jobs:
             fi
           fi
 
+      # === Use provided deployment_id ===
+      - name: Use provided deployment_id if any
+        id: dpl_input
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.deployment_id }}" ]; then
+            echo "id=${{ github.event.inputs.deployment_id }}" >> $GITHUB_OUTPUT
+          fi
+
+      # === Find deployment if no manual ID ===
       - name: Find Vercel deployment
         id: dep
         shell: bash
         run: |
           set -e
-          test -n "$VERCEL_TOKEN"   || { echo "VERCEL_TOKEN is empty"; exit 1; }
-          test -n "$VERCEL_PROJECT" || { echo "VERCEL_PROJECT_ID is empty"; exit 1; }
-          test -n "$VERCEL_ORG"     || { echo "VERCEL_ORG_ID is empty"; exit 1; }
+          if [ -n "${{ steps.dpl_input.outputs.id }}" ]; then
+            echo "id=${{ steps.dpl_input.outputs.id }}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
 
           curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
             "https://api.vercel.com/v6/deployments?projectId=$VERCEL_PROJECT&target=preview&limit=50" \
@@ -68,136 +82,101 @@ jobs:
 
           DEP_ID=$(jq -r --arg PR "${{ steps.ctx.outputs.pr }}" \
             '.deployments[] | select(.meta.githubPrId == $PR) | .uid' deployments.json | head -n1)
-
           if [ -z "$DEP_ID" ] || [ "$DEP_ID" = "null" ]; then
             DEP_ID=$(jq -r --arg SHA "${{ steps.ctx.outputs.sha }}" \
               '.deployments[] | select(.meta.githubCommitSha == $SHA) | .uid' deployments.json | head -n1)
           fi
-
           if [ -z "$DEP_ID" ] || [ "$DEP_ID" = "null" ]; then
             DEP_ID=$(jq -r '.deployments[0].uid' deployments.json)
           fi
-
           if [ -z "$DEP_ID" ] || [ "$DEP_ID" = "null" ]; then
-            echo "No deployment found (preview target)"; exit 1
+            echo "No deployment found"; exit 1
           fi
-
           echo "id=$DEP_ID" >> $GITHUB_OUTPUT
 
-      - name: Fetch events JSON (primary)
-        id: ev
+      # === Fetch deployment events ===
+      - name: Fetch deployment events
         shell: bash
         run: |
-          set -e
-          URL="https://api.vercel.com/v2/deployments/${{ steps.dep.outputs.id }}/events?teamId=$VERCEL_ORG&limit=1000&since=0"
-          echo "GET $URL"
-          curl -sS -D headers-events.txt -o vercel-events.json \
-            -H "Authorization: Bearer $VERCEL_TOKEN" "$URL" || true
-          echo "---- /events HEADERS ----"; head -n 5 headers-events.txt || true
-          echo "---- /events JSON HEAD (400) ----"; head -c 400 vercel-events.json || true; echo
+          URL="https://api.vercel.com/v2/deployments/${{ steps.dep.outputs.id }}/events?teamId=$VERCEL_ORG&limit=1000"
+          curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" "$URL" > vercel-events.json
 
-      - name:  Fetch builds & build events
-        id: bld
-        if: ${{ always() }}
+      # === Parse logs (array or {events:[]}) ===
+      - name: Parse logs
+        id: logs
         shell: bash
         run: |
-          EMPTY="no"
-          if [ ! -s vercel-events.json ]; then EMPTY="yes"; fi
-          if grep -q '"events"\s*:\s*\[\s*\]' vercel-events.json 2>/dev/null; then EMPTY="yes"; fi
-
-          if [ "$EMPTY" = "no" ]; then
-            echo "skip_fallback=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          echo "Primary /events empty → trying /builds … /builds/{buildId}/events"
-
-          BURL="https://api.vercel.com/v2/deployments/${{ steps.dep.outputs.id }}/builds?teamId=$VERCEL_ORG"
-          curl -sS -D headers-builds.txt -o vercel-builds.json \
-            -H "Authorization: Bearer $VERCEL_TOKEN" "$BURL" || true
-          echo "---- /builds HEADERS ----"; head -n 5 headers-builds.txt || true
-          echo "---- /builds JSON HEAD (400) ----"; head -c 400 vercel-builds.json || true; echo
-
-          BUILD_ID=$(jq -r '(.builds // .[])? | (.[0].id // .id // empty)' vercel-builds.json 2>/dev/null || true)
-          if [ -z "$BUILD_ID" ] || [ "$BUILD_ID" = "null" ]; then
-            echo "No buildId found in /builds"; exit 0
-          fi
-          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
-
-          BEURL="https://api.vercel.com/v2/deployments/${{ steps.dep.outputs.id }}/builds/${BUILD_ID}/events?teamId=$VERCEL_ORG&limit=1000"
-          curl -sS -D headers-build-events.txt -o vercel-build-events.json \
-            -H "Authorization: Bearer $VERCEL_TOKEN" "$BEURL" || true
-          echo "---- /builds/{id}/events HEADERS ----"; head -n 5 headers-build-events.txt || true
-          echo "---- /builds/{id}/events JSON HEAD (400) ----"; head -c 400 vercel-build-events.json || true; echo
-
-      - name: Build plaintext log
-        shell: bash
-        run: |
-          SRC="vercel-events.json"
-          if [ -s vercel-build-events.json ]; then SRC="vercel-build-events.json"; fi
-
           jq -r '
-            ( .events // .builds // [] ) as $root
-            | $root[]
+            def evs:
+              if type=="array" then .
+              elif has("events") then .events
+              else [] end;
+            evs
+            | .[]
             | ( .payload? // .entry? // . )
             | ( .text?, .message?, .error?, .error?.message?, (.entries? // [])[]?, (.logs? // [])[]? )
             | strings
-          ' "$SRC" > vercel-build.log 2>/dev/null || true
+          ' vercel-events.json > vercel-build.log || true
 
-          if [ ! -s vercel-build.log ]; then
-            jq -r '
-              paths(scalars) as $p
-              | ( ($p|tostring) | test("text|message|error"; "i") )
-              | select(.)
-              | getpath($p)
-              | tostring
-            ' "$SRC" > vercel-build.log 2>/dev/null || true
+          if [ -s vercel-build.log ]; then
+            echo "has_text=true" >> $GITHUB_OUTPUT
           fi
 
-          if [ ! -s vercel-build.log ]; then
-            echo "[no known log fields found; dumping tail of raw JSON]" > vercel-build.log
-            tail -c 1500 "$SRC" >> vercel-build.log || true
-          fi
+      # === Deployment info (URL & state) ===
+      - name: Deployment info
+        id: info
+        shell: bash
+        run: |
+          curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
+            "https://api.vercel.com/v13/deployments/${{ steps.dep.outputs.id }}?teamId=$VERCEL_ORG" \
+            > vercel-deployment.json
+          echo "url=$(jq -r '.url' vercel-deployment.json)" >> $GITHUB_OUTPUT
+          echo "state=$(jq -r '.readyState' vercel-deployment.json)" >> $GITHUB_OUTPUT
 
-      - name: Prepare markdown (tail + collapsible full)
+      # === Prepare markdown ===
+      - name: Prepare markdown
         id: md
         shell: bash
         run: |
           TAIL_LINES=200
-          tail -n ${TAIL_LINES} vercel-build.log > tail.txt || true
-          head -c 60000 vercel-build.log > full_truncated.txt || true
+          if [ -s vercel-build.log ]; then
+            tail -n ${TAIL_LINES} vercel-build.log > tail.txt
+          else
+            echo "[no events text returned by Vercel API]" > tail.txt
+          fi
+
+          DEP_ID="${{ steps.dep.outputs.id }}"
+          DEP_URL="${{ steps.info.outputs.url }}"
+          STATE="${{ steps.info.outputs.state }}"
 
           {
             echo "<!-- vercel-logs-anchor -->"
-            echo "❌ Vercel deployment \`${{ steps.dep.outputs.id }}\` failed (or produced logs)."
+            echo "🔗 Deployment: \`$DEP_ID\` — state: **$STATE**"
+            if [ -n "$DEP_URL" ]; then
+              echo
+              echo "Preview URL: https://$DEP_URL"
+            fi
             echo
-            echo "**Last ${TAIL_LINES} lines:**"
-            echo
-            echo '```'
-            cat tail.txt 2>/dev/null || true
-            echo '```'
-            echo
-            echo "<details><summary>Show truncated full log (~60k chars)</summary>"
+            echo "**Tail (${TAIL_LINES} lines):**"
             echo
             echo '```'
-            cat full_truncated.txt 2>/dev/null || true
+            cat tail.txt
             echo '```'
-            echo
-            echo "</details>"
           } > comment.md
 
           {
             echo "### Vercel Logs (tail ${TAIL_LINES})"
             echo
             echo '```'
-            cat tail.txt 2>/dev/null || true
+            cat tail.txt
             echo '```'
           } > summary.md
 
+      # === Add summary ===
       - name: Add summary to PR Checks
-        run: |
-          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+        run: cat summary.md >> "$GITHUB_STEP_SUMMARY"
 
+      # === Comment in PR ===
       - name: Post/Update PR comment
         if: ${{ steps.ctx.outputs.pr != '' }}
         uses: peter-evans/create-or-update-comment@v4
@@ -208,16 +187,13 @@ jobs:
           search: '<!-- vercel-logs-anchor -->'
           reactions: eyes
 
-      - name: Upload raw responses (debug)
+      # === Upload raw JSON (debug) ===
+      - name: Upload raw JSON
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: vercel-raw
           path: |
-            headers-events.txt
             vercel-events.json
-            headers-builds.txt
-            vercel-builds.json
-            headers-build-events.txt
-            vercel-build-events.json
+            vercel-deployment.json
             vercel-build.log
