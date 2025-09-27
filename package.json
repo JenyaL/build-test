@@ -5,8 +5,9 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
+    "build": "node index.js",
+    "test": "echo \"No tests yet\""
+  }
   "repository": {
     "type": "git",
     "url": "git+https://github.com/JenyaL/build-test.git"
