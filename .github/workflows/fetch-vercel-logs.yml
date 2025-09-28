@@ -3,7 +3,6 @@ name: Fetch Vercel Logs (PR + auto on Vercel checks)
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  # react to any finished Vercel check (covers manual Redeploy from Vercel UI)
   check_run:
     types: [completed]
   # manual "refetch" (optionally trigger redeploy first)
@@ -91,7 +90,6 @@ jobs:
             core.setOutput('pr',  pr  ? String(pr) : '');
             core.setOutput('sha', sha ? String(sha) : '');
 
-      # seed deployment id from Vercel check details_url (if this workflow fired from Vercel)
       - name: Seed deployment from check_run
         id: seed
         if: ${{ github.event_name == 'check_run' }}
@@ -194,7 +192,6 @@ jobs:
           cat tail.txt >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
-      # Dedicated check-run (so it shows on the Checks tab)
       - name: Publish check run (Vercel Logs)
         if: ${{ steps.ctx.outputs.sha != '' }}
         uses: actions/github-script@v7
@@ -203,12 +200,10 @@ jobs:
             const fs = require('fs');
             const {owner, repo} = context.repo;
             const sha  = '${{ steps.ctx.outputs.sha }}';
-            const dep  = '${{ steps.dep.outputs.id || steps.seed.outputs.id }}';
             const state= '${{ steps.info.outputs.state }}';
             const url  = '${{ steps.info.outputs.url }}';
             const tail = fs.readFileSync('tail.txt','utf8');
             const isFail = state === 'ERROR';
-
             await github.rest.checks.create({
               owner, repo,
               name: 'Vercel Logs',
@@ -221,30 +216,39 @@ jobs:
               }
             });
 
-      # PR comment — ONLY on error (no noise on success)
+      - name: Build PR comment markdown (failure only)
+        if: ${{ steps.ctx.outputs.pr != '' && steps.info.outputs.state == 'ERROR' }}
+        run: |
+          ICON="❌"
+          PREVIEW=""
+          if [ -n "${{ steps.info.outputs.url }}" ]; then
+            PREVIEW="https://${{ steps.info.outputs.url }}"
+          fi
+          {
+            echo "${ICON} Deployment: \`${{ steps.dep.outputs.id || steps.seed.outputs.id }}\` — state: **${{ steps.info.outputs.state }}**"
+            if [ -n "$PREVIEW" ]; then
+              echo
+              echo "Preview: $PREVIEW"
+            fi
+            echo
+            echo "<details><summary>Show full log (truncated)</summary>"
+            echo
+            echo '```'
+            cat full.txt
+            echo '```'
+            echo
+            echo "</details>"
+          } > comment.md
+
       - name: Comment to PR on failure
         if: ${{ steps.ctx.outputs.pr != '' && steps.info.outputs.state == 'ERROR' }}
         uses: peter-evans/create-or-update-comment@v4
         with:
           issue-number: ${{ steps.ctx.outputs.pr }}
-          body: |
-            ❌ Deployment: `${{ steps.dep.outputs.id || steps.seed.outputs.id }}` — state: **${{ steps.info.outputs.state }}**
-            ${{
-              steps.info.outputs.url != '' &&
-              format('\nPreview: https://{0}\n', steps.info.outputs.url)
-            }}
-            **Tail (200 lines):**
-            ```
-            ${{ steps.logs.outputs.nil || '' }}
-            ```
-            <details><summary>Show full log (truncated)</summary>
+          body-file: comment.md
+          edit-mode: replace
+          search: 'Deployment:'
 
-            ```
-            ${{ steps.logs.outputs.nil || '' }}
-            ```
-            </details>
-
-      # Reflect Vercel error in the job status (so Actions/Checks go red)
       - name: Fail job if Vercel ERROR
         if: ${{ steps.info.outputs.state == 'ERROR' }}
         run: |
