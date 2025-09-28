@@ -1,13 +1,13 @@
-name: Fetch Vercel Logs (PR + auto on failure)
+name: Fetch Vercel Logs (PR + auto on any Vercel check)
 
 on:
-  # Runs on PR events
+  # Run on PR activity
   pull_request:
     types: [opened, synchronize, reopened]
-  # Auto-run when a Vercel check finishes -> if it failed, we fetch logs
+  # Run whenever a Vercel check finishes (covers manual Redeploy from Vercel UI)
   check_run:
     types: [completed]
-  # Manual trigger with optional inputs
+  # Manual: refetch by PR, SHA or by explicit deployment id (dpl_...)
   workflow_dispatch:
     inputs:
       pr:
@@ -16,6 +16,13 @@ on:
       sha:
         description: "Head commit SHA (overrides PR)"
         required: false
+      deployment:
+        description: "Explicit Vercel deployment id (dpl_...)"
+        required: false
+      redeploy:
+        description: "Trigger Vercel Deploy Hook first (yes/no)"
+        required: false
+        default: "no"
 
 permissions:
   contents: read
@@ -24,49 +31,53 @@ permissions:
 
 jobs:
   fetch:
-    # Run on PR OR when a failing Vercel check finishes
+    # Run on PR, manual, or when a Vercel check completed
     if: |
       github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'check_run' &&
        (contains(github.event.check_run.name, 'Vercel') ||
-        contains(github.event.check_run.app.slug, 'vercel')) &&
-       github.event.check_run.conclusion == 'failure') ||
-      github.event_name == 'workflow_dispatch'
+        contains(github.event.check_run.app.slug, 'vercel')))
     runs-on: ubuntu-latest
     env:
-      # Set these in: Settings → Secrets and variables → Actions
-      VERCEL_TOKEN:   ${{ secrets.VERCEL_TOKEN }}       # Personal token
+      # Set in repo Settings → Secrets and variables → Actions
+      VERCEL_TOKEN:   ${{ secrets.VERCEL_TOKEN }}       # personal token
       VERCEL_PROJECT: ${{ secrets.VERCEL_PROJECT_ID }}  # prj_...
       VERCEL_ORG:     ${{ secrets.VERCEL_ORG_ID }}      # team_...
+      # Optional: Vercel Deploy Hook URL to trigger a redeploy w/o commit
+      VERCEL_DEPLOY_HOOK_URL: ${{ secrets.VERCEL_DEPLOY_HOOK_URL }}
 
     steps:
-      # --- Keep the proven steps that were working ---
-
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Ensure jq installed
+      - name: Ensure jq is installed
         run: |
           if ! command -v jq >/dev/null 2>&1; then
             sudo apt-get update && sudo apt-get install -y jq
           fi
 
-      # Resolve PR & SHA (priority: manual inputs → event payload → latest open PR)
+      # (Optional) Redeploy from GitHub before fetching logs
+      - name: Optional redeploy via Vercel Deploy Hook
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.redeploy == 'yes' && env.VERCEL_DEPLOY_HOOK_URL != '' }}
+        run: |
+          echo "Triggering Vercel Deploy Hook..."
+          curl -sS -X POST "$VERCEL_DEPLOY_HOOK_URL" -o /dev/null
+          echo "Redeploy requested. Waiting ~15s so Vercel posts a fresh check..."
+          sleep 15
+
+      # Resolve PR / SHA (priority: inputs → event → latest open PR)
       - name: Resolve PR & SHA
         id: ctx
         uses: actions/github-script@v7
         with:
           script: |
             const {owner, repo} = context.repo;
-
-            // 1) Inputs (manual run)
             const inputPr  = core.getInput('pr');
             const inputSha = core.getInput('sha');
-
             let pr  = inputPr  ? Number(inputPr) : null;
             let sha = inputSha || null;
 
-            // 2) From event payload
             if (context.eventName === 'pull_request') {
               pr  = pr  ?? context.payload.pull_request.number;
               sha = sha ?? context.payload.pull_request.head.sha;
@@ -79,7 +90,6 @@ jobs:
               }
             }
 
-            // 3) Fallback: latest open PR
             if (!pr) {
               const prs = await github.rest.pulls.list({ owner, repo, state: 'open', per_page: 1, sort: 'updated', direction: 'desc' });
               pr = prs.data[0]?.number || null;
@@ -93,77 +103,75 @@ jobs:
             core.setOutput('pr',  pr  ? String(pr) : '');
             core.setOutput('sha', sha ? String(sha) : '');
 
-      # If we came from a Vercel check, try to get dpl_* (and preview host) from details_url
-      - name: Try get deployment from Vercel check_run
-        id: from_check
-        if: ${{ github.event_name == 'check_run' }}
+      # Try to get deployment id directly:
+      #  1) workflow_dispatch input "deployment"
+      #  2) parse from Vercel check details_url
+      - name: Seed deployment from inputs/check_run
+        id: seed
         uses: actions/github-script@v7
         with:
           script: |
-            const url = context.payload.check_run?.details_url || '';
-            let depId = '';
+            let depId = core.getInput('deployment') || '';
             let host = '';
-            if (url) {
-              const m1 = url.match(/dpl_[A-Za-z0-9]+/);
-              if (m1) depId = m1[0];
-              const m2 = url.match(/https?:\/\/([^\/\s]+\.vercel\.app)/i);
-              if (m2) host = m2[1];
+            if (!depId && context.eventName === 'check_run') {
+              const url = context.payload.check_run?.details_url || '';
+              if (url) {
+                const m1 = url.match(/dpl_[A-Za-z0-9]+/);
+                if (m1) depId = m1[0];
+                const m2 = url.match(/https?:\/\/([^\/\s]+\.vercel\.app)/i);
+                if (m2) host = m2[1];
+              }
             }
-            core.info(`details_url: ${url}`);
-            core.setOutput('id',   depId);
+            core.setOutput('id', depId);
             core.setOutput('host', host);
 
-      # Fallback: find deployment by PR number (meta.githubPrId)
-      - name: Fallback by PR (meta.githubPrId)
-        id: dep_by_pr
-        if: ${{ steps.from_check.outputs.id == '' }}
+      # If no id yet — try by PR (meta.githubPrId) then by preview host
+      - name: Find deployment by PR/host
+        id: dep
         run: |
-          PR="${{ steps.ctx.outputs.pr }}"
-          if [ -z "$PR" ]; then
-            echo "No PR in context — skip PR lookup."
+          if [ -n "${{ steps.seed.outputs.id }}" ]; then
+            echo "id=${{ steps.seed.outputs.id }}" >> $GITHUB_OUTPUT
             exit 0
           fi
+
           curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
             "https://api.vercel.com/v6/deployments?projectId=$VERCEL_PROJECT&target=preview&limit=50" > deployments.json
-          DEP_ID=$(jq -r --arg PR "$PR" '.deployments[] | select(.meta.githubPrId == $PR) | .uid' deployments.json | head -n1)
-          if [ -n "$DEP_ID" ] && [ "$DEP_ID" != "null" ]; then
-            echo "id=$DEP_ID" >> $GITHUB_OUTPUT
+
+          # Match by PR number first
+          PR="${{ steps.ctx.outputs.pr }}"
+          if [ -n "$PR" ]; then
+            DEP_ID=$(jq -r --arg PR "$PR" '.deployments[] | select(.meta.githubPrId == $PR) | .uid' deployments.json | head -n1)
           fi
 
-      # Fallback: if we have preview host from details_url, match by .url
-      - name: Fallback by preview host
-        id: dep_by_host
-        if: ${{ steps.from_check.outputs.id == '' && steps.from_check.outputs.host != '' && steps.dep_by_pr.outputs.id == '' }}
-        run: |
-          HOST="${{ steps.from_check.outputs.host }}"
-          curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
-            "https://api.vercel.com/v6/deployments?projectId=$VERCEL_PROJECT&target=preview&limit=50" > deployments.json
-          DEP_ID=$(jq -r --arg HN "$HOST" '.deployments[] | select(.url == $HN) | .uid' deployments.json | head -n1)
-          if [ -n "$DEP_ID" ] && [ "$DEP_ID" != "null" ]; then
-            echo "id=$DEP_ID" >> $GITHUB_OUTPUT
+          # If still empty, try to match by preview host (from check_run)
+          if [ -z "$DEP_ID" ] || [ "$DEP_ID" = "null" ]; then
+            HOST="${{ steps.seed.outputs.host }}"
+            if [ -n "$HOST" ]; then
+              DEP_ID=$(jq -r --arg HN "$HOST" '.deployments[] | select(.url == $HN) | .uid' deployments.json | head -n1)
+            fi
           fi
 
-      # Select final deployment id
-      - name: Select deployment id
-        id: sel
-        run: |
-          echo "id=${{ steps.from_check.outputs.id || steps.dep_by_pr.outputs.id || steps.dep_by_host.outputs.id }}" >> $GITHUB_OUTPUT
+          # As a last resort, pick the latest preview deployment
+          if [ -z "$DEP_ID" ] || [ "$DEP_ID" = "null" ]; then
+            DEP_ID=$(jq -r '.deployments[0].uid' deployments.json)
+          fi
 
-      # Fetch deployment events (build logs)
+          if [ -z "$DEP_ID" ] || [ "$DEP_ID" = "null" ]; then
+            echo "No deployment id found"; exit 1
+          fi
+
+          echo "id=$DEP_ID" >> $GITHUB_OUTPUT
+
       - name: Fetch deployment events
         id: ev
         run: |
-          DEP="${{ steps.sel.outputs.id }}"
-          if [ -z "$DEP" ]; then
-            echo "No deployment id resolved — nothing to fetch."; exit 1
-          fi
+          DEP="${{ steps.dep.outputs.id || steps.seed.outputs.id }}"
           EV_URL="https://api.vercel.com/v2/deployments/${DEP}/events?teamId=${{ env.VERCEL_ORG }}&limit=1000"
           echo "GET $EV_URL"
           curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" "$EV_URL" > vercel-events.json
           echo "Events size: $(wc -c < vercel-events.json)"
 
-      # Parse JSON → plaintext (tail + truncated full)
-      - name: Parse logs
+      - name: Parse logs to plaintext
         id: logs
         run: |
           jq -r '
@@ -186,20 +194,19 @@ jobs:
             cp tail.txt full_truncated.txt
           fi
 
-      # Get deployment info (preview URL and readyState)
       - name: Deployment info
         id: info
         run: |
-          DEP="${{ steps.sel.outputs.id }}"
+          DEP="${{ steps.dep.outputs.id || steps.seed.outputs.id }}"
           curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
             "https://api.vercel.com/v13/deployments/${DEP}?teamId=${{ env.VERCEL_ORG }}" > vercel-deployment.json
           echo "url=$(jq -r '.url // empty' vercel-deployment.json)"   >> $GITHUB_OUTPUT
           echo "state=$(jq -r '.readyState // empty' vercel-deployment.json)" >> $GITHUB_OUTPUT
 
-      # Put the tail into the job's Summary (visible in Checks → job → Summary)
-      - name: Add job summary
+      - name: Add job summary (tail 200)
         run: |
-          echo "### Vercel Logs (tail 200)" >> "$GITHUB_STEP_SUMMARY"
+          ICON="✅"; [ "${{ steps.info.outputs.state }}" = "ERROR" ] && ICON="❌"
+          echo "### ${ICON} Vercel Logs (tail 200)" >> "$GITHUB_STEP_SUMMARY"
           if [ -n "${{ steps.info.outputs.url }}" ]; then
             echo "Preview: https://${{ steps.info.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
@@ -208,7 +215,6 @@ jobs:
           cat tail.txt >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
-      # Create a dedicated check-run "Vercel Logs" attached to the resolved SHA
       - name: Publish check run (Vercel Logs)
         if: ${{ steps.ctx.outputs.sha != '' }}
         uses: actions/github-script@v7
@@ -217,29 +223,30 @@ jobs:
             const fs = require('fs');
             const {owner, repo} = context.repo;
             const sha  = '${{ steps.ctx.outputs.sha }}';
-            const dep  = '${{ steps.sel.outputs.id }}';
+            const dep  = '${{ steps.dep.outputs.id || steps.seed.outputs.id }}';
             const state= '${{ steps.info.outputs.state }}';
             const url  = '${{ steps.info.outputs.url }}';
             const tail = fs.readFileSync('tail.txt','utf8');
+            const isFail = state === 'ERROR';
 
             await github.rest.checks.create({
               owner, repo,
               name: 'Vercel Logs',
               head_sha: sha,
               status: 'completed',
-              conclusion: (state === 'ERROR' ? 'failure' : 'neutral'),
+              conclusion: isFail ? 'failure' : 'success',
               output: {
                 title: `Vercel Logs (${state || 'unknown'})`,
                 summary: `Deployment: ${dep}\n${url ? `Preview: https://${url}\n` : ''}\n\nLast 200 lines:\n\n\`\`\`\n${tail}\n\`\`\``
               }
             });
 
-      # Build a rich PR comment (tail + collapsible full)
-      - name: Build PR comment markdown
+      - name: Build PR comment (tail + collapsible full)
         if: ${{ steps.ctx.outputs.pr != '' }}
         run: |
+          ICON="✅"; [ "${{ steps.info.outputs.state }}" = "ERROR" ] && ICON="❌"
           {
-            echo "🔗 Deployment: \`${{ steps.sel.outputs.id }}\` — state: **${{ steps.info.outputs.state }}**"
+            echo "${ICON} Deployment: \`${{ steps.dep.outputs.id || steps.seed.outputs.id }}\` — state: **${{ steps.info.outputs.state }}**"
             if [ -n "${{ steps.info.outputs.url }}" ]; then
               echo
               echo "Preview: https://${{ steps.info.outputs.url }}"
@@ -267,8 +274,14 @@ jobs:
           issue-number: ${{ steps.ctx.outputs.pr }}
           body-file: comment.md
 
-      # Upload raw artifacts for debugging (optional)
-      - name: Upload raw artifacts
+      # Mark the Actions job red if Vercel says ERROR (so Checks tab isn't green)
+      - name: Fail job if Vercel ERROR
+        if: ${{ steps.info.outputs.state == 'ERROR' }}
+        run: |
+          echo "Vercel state is ERROR — failing this job to reflect the error in Checks."
+          exit 1
+
+      - name: Upload raw (debug)
         if: always()
         uses: actions/upload-artifact@v4
         with:
