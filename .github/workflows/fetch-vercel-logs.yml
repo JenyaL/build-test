@@ -5,16 +5,11 @@ on:
     types: [opened, synchronize, reopened]
   check_run:
     types: [completed]
-  # manual "refetch" (optionally trigger redeploy first)
   workflow_dispatch:
     inputs:
       pr:
         description: "PR number (e.g. 9)"
-        required: false
-      redeploy:
-        description: "Trigger Vercel Deploy Hook first? (yes/no)"
-        required: false
-        default: "no"
+        required: true
 
 permissions:
   contents: read
