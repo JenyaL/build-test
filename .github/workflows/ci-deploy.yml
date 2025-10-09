@@ -33,8 +33,7 @@ jobs:
         run: npm run build
 
       - name: Upload build summary
-        run: |
-          echo "Build ✅" >> "$GITHUB_STEP_SUMMARY"
+        run: echo "Build ✅" >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
     needs: build
@@ -46,6 +45,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 18
+
+      - name: Ensure jq
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y jq
+          fi
 
       - name: Install Vercel CLI
         run: npm i -g vercel@latest
@@ -67,37 +72,28 @@ jobs:
           VC_TEAM:  ${{ env.VERCEL_ORG }}
           TARGET:   ${{ steps.tgt.outputs.target }}
         run: |
-          set -e
+          set -euo pipefail
 
+          # Сформируем базовую команду деплоя
+          CMD=(vercel deploy --yes --token="$VC_TOKEN" --scope="$VC_TEAM" --project="$VC_PROJ" --confirm --output=json)
+          # Прод деплой – только для push в main
+          if [ "$TARGET" = "production" ]; then
+            CMD+=(--prod)
+          fi
 
-          DEPLOY_OUTPUT=$(vercel --yes \
-            --token="$VC_TOKEN" \
-            --scope="$VC_TEAM" \
-            --project="$VC_PROJ" \
-            --target="$TARGET" \
-            --confirm 2>&1)
+          # Запускаем и получаем JSON
+          DEPLOY_JSON="$("${CMD[@]}")"
+          echo "$DEPLOY_JSON" > deploy.json
 
-          echo "$DEPLOY_OUTPUT"
+          # Вытаскиваем основные поля (CLI обычно отдаёт url и/или aliases[])
+          URL=$(jq -r '.url // empty' deploy.json)
+          if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+            URL=$(jq -r '.aliases[0] // empty' deploy.json)
+          fi
+          ID=$(jq -r '.id // .uid // empty' deploy.json)
 
-          URL=$(printf "%s\n" "$DEPLOY_OUTPUT" | grep -Eo 'https?://[a-zA-Z0-9.-]+\.vercel\.app' | tail -n1 || true)
           echo "url=$URL" >> $GITHUB_OUTPUT
-
-          HOST=$(echo "$URL" | sed -E 's#https?://##')
-          echo "host=$HOST" >> $GITHUB_OUTPUT
-
-      - name: Resolve Deployment ID
-        id: dep
-        if: ${{ steps.deploy.outputs.host != '' }}
-        env:
-          VC_TOKEN: ${{ env.VERCEL_TOKEN }}
-          VC_TEAM:  ${{ env.VERCEL_ORG }}
-        run: |
-          # /v13/deployments?teamId=...&url=<host>
-          HOST="${{ steps.deploy.outputs.host }}"
-          UID=$(curl -sS -H "Authorization: Bearer $VC_TOKEN" \
-            "https://api.vercel.com/v13/deployments?teamId=$VC_TEAM&url=$HOST" \
-            | jq -r '.deployments[0].uid // empty')
-          echo "id=$UID" >> $GITHUB_OUTPUT
+          echo "id=$ID"   >> $GITHUB_OUTPUT
 
       - name: Summary (URL + ID)
         run: |
@@ -109,8 +105,8 @@ jobs:
           else
             echo "- URL: (not detected)" >> "$GITHUB_STEP_SUMMARY"
           fi
-          if [ -n "${{ steps.dep.outputs.id }}" ]; then
-            echo "- Deployment ID: \`${{ steps.dep.outputs.id }}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${{ steps.deploy.outputs.id }}" ]; then
+            echo "- Deployment ID: \`${{ steps.deploy.outputs.id }}\`" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "- Deployment ID: (not detected)" >> "$GITHUB_STEP_SUMMARY"
           fi
