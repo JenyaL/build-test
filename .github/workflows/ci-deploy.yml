@@ -63,6 +63,10 @@ jobs:
             echo "target=production" >> $GITHUB_OUTPUT
           fi
 
+      - name: Prebuild for Vercel
+        run: |
+          vercel build --token "${{ env.VERCEL_TOKEN }}" --scope "${{ env.VERCEL_ORG }}"
+
       - name: Deploy to Vercel (from GitHub)
         id: deploy
         env:
