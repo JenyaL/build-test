@@ -1,0 +1,116 @@
+name: CI + Deploy (POC)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+env:
+  VERCEL_TOKEN:   ${{ secrets.VERCEL_TOKEN }}
+  VERCEL_PROJECT: ${{ secrets.VERCEL_PROJECT_ID }}
+  VERCEL_ORG:     ${{ secrets.VERCEL_ORG_ID }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+
+      - name: Install
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload build summary
+        run: |
+          echo "Build ✅" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    needs: build
+    if: ${{ success() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install Vercel CLI
+        run: npm i -g vercel@latest
+
+      - name: Decide target
+        id: tgt
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "target=preview" >> $GITHUB_OUTPUT
+          else
+            echo "target=production" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy to Vercel (from GitHub)
+        id: deploy
+        env:
+          VC_TOKEN: ${{ env.VERCEL_TOKEN }}
+          VC_PROJ:  ${{ env.VERCEL_PROJECT }}
+          VC_TEAM:  ${{ env.VERCEL_ORG }}
+          TARGET:   ${{ steps.tgt.outputs.target }}
+        run: |
+          set -e
+
+
+          DEPLOY_OUTPUT=$(vercel --yes \
+            --token="$VC_TOKEN" \
+            --scope="$VC_TEAM" \
+            --project="$VC_PROJ" \
+            --target="$TARGET" \
+            --confirm 2>&1)
+
+          echo "$DEPLOY_OUTPUT"
+
+          URL=$(printf "%s\n" "$DEPLOY_OUTPUT" | grep -Eo 'https?://[a-zA-Z0-9.-]+\.vercel\.app' | tail -n1 || true)
+          echo "url=$URL" >> $GITHUB_OUTPUT
+
+          HOST=$(echo "$URL" | sed -E 's#https?://##')
+          echo "host=$HOST" >> $GITHUB_OUTPUT
+
+      - name: Resolve Deployment ID
+        id: dep
+        if: ${{ steps.deploy.outputs.host != '' }}
+        env:
+          VC_TOKEN: ${{ env.VERCEL_TOKEN }}
+          VC_TEAM:  ${{ env.VERCEL_ORG }}
+        run: |
+          # /v13/deployments?teamId=...&url=<host>
+          HOST="${{ steps.deploy.outputs.host }}"
+          UID=$(curl -sS -H "Authorization: Bearer $VC_TOKEN" \
+            "https://api.vercel.com/v13/deployments?teamId=$VC_TEAM&url=$HOST" \
+            | jq -r '.deployments[0].uid // empty')
+          echo "id=$UID" >> $GITHUB_OUTPUT
+
+      - name: Summary (URL + ID)
+        run: |
+          echo "### Vercel Deployment" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Target: **${{ steps.tgt.outputs.target }}**" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${{ steps.deploy.outputs.url }}" ]; then
+            echo "- URL: ${{ steps.deploy.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- URL: (not detected)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -n "${{ steps.dep.outputs.id }}" ]; then
+            echo "- Deployment ID: \`${{ steps.dep.outputs.id }}\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Deployment ID: (not detected)" >> "$GITHUB_STEP_SUMMARY"
+          fi
