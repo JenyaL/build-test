@@ -10,9 +10,8 @@ permissions:
   contents: read
 
 env:
-  VERCEL_TOKEN:   ${{ secrets.VERCEL_TOKEN }}
-  VERCEL_PROJECT: ${{ secrets.VERCEL_PROJECT_ID }}
-  VERCEL_ORG:     ${{ secrets.VERCEL_ORG_ID }}
+  VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+  VERCEL_ORG:   ${{ secrets.VERCEL_ORG_ID }}
 
 jobs:
   build:
@@ -73,22 +72,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          CMD=(vercel deploy --yes --token="$VC_TOKEN" --scope="$VC_TEAM" --prebuilt --confirm --output=json)
+          ARGS=(deploy --yes --token "$VC_TOKEN" --scope "$VC_TEAM" --prebuilt)
           if [ "$TARGET" = "production" ]; then
-            CMD+=(--prod)
+            ARGS+=(--prod)
           fi
 
-          DEPLOY_JSON="$("${CMD[@]}")"
-          echo "$DEPLOY_JSON" > deploy.json
+          URL="$(vercel "${ARGS[@]}")"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
 
-          URL=$(jq -r '.url // empty' deploy.json)
-          if [ -z "$URL" ] || [ "$URL" = "null" ]; then
-            URL=$(jq -r '.aliases[0] // empty' deploy.json)
-          fi
-          ID=$(jq -r '.id // .uid // empty' deploy.json)
-
-          echo "url=$URL" >> $GITHUB_OUTPUT
-          echo "id=$ID"   >> $GITHUB_OUTPUT
+          HOST="${URL#https://}"
+          ID="$(curl -fsSL -H "Authorization: Bearer $VC_TOKEN" \
+            "https://api.vercel.com/v13/deployments/$HOST" | jq -r '.id // empty')"
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
 
       - name: Summary (URL + ID)
         run: |
