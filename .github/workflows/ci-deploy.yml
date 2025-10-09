@@ -68,24 +68,19 @@ jobs:
         id: deploy
         env:
           VC_TOKEN: ${{ env.VERCEL_TOKEN }}
-          VC_PROJ:  ${{ env.VERCEL_PROJECT }}
           VC_TEAM:  ${{ env.VERCEL_ORG }}
           TARGET:   ${{ steps.tgt.outputs.target }}
         run: |
           set -euo pipefail
 
-          # Сформируем базовую команду деплоя
-          CMD=(vercel deploy --yes --token="$VC_TOKEN" --scope="$VC_TEAM" --project="$VC_PROJ" --confirm --output=json)
-          # Прод деплой – только для push в main
+          CMD=(vercel deploy --yes --token="$VC_TOKEN" --scope="$VC_TEAM" --prebuilt --confirm --output=json)
           if [ "$TARGET" = "production" ]; then
             CMD+=(--prod)
           fi
 
-          # Запускаем и получаем JSON
           DEPLOY_JSON="$("${CMD[@]}")"
           echo "$DEPLOY_JSON" > deploy.json
 
-          # Вытаскиваем основные поля (CLI обычно отдаёт url и/или aliases[])
           URL=$(jq -r '.url // empty' deploy.json)
           if [ -z "$URL" ] || [ "$URL" = "null" ]; then
             URL=$(jq -r '.aliases[0] // empty' deploy.json)
