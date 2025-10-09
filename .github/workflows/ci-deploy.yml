@@ -63,9 +63,18 @@ jobs:
             echo "target=production" >> $GITHUB_OUTPUT
           fi
 
+      - name: Pull Vercel Project Settings
+        run: |
+          vercel pull --yes \
+            --environment "${{ steps.tgt.outputs.target }}" \
+            --token "${{ env.VERCEL_TOKEN }}" \
+            --scope "${{ env.VERCEL_ORG }}"
+
       - name: Prebuild for Vercel
         run: |
-          vercel build --token "${{ env.VERCEL_TOKEN }}" --scope "${{ env.VERCEL_ORG }}"
+          vercel build \
+            --token "${{ env.VERCEL_TOKEN }}" \
+            --scope "${{ env.VERCEL_ORG }}"
 
       - name: Deploy to Vercel (from GitHub)
         id: deploy
