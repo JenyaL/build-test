@@ -8,6 +8,9 @@ on:
 
 permissions:
   contents: read
+  issues: write
+  pull-requests: write
+  deployments: write
 
 env:
   VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
@@ -20,31 +23,20 @@ jobs:
       is_pr: ${{ github.event_name == 'pull_request' }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 18
           cache: 'npm'
-
       - name: Install
-        run: |
-          npm ci || npm install
-
+        run: npm ci || npm install
       - name: Lint
-        run: |
-          if npm run | grep -q " lint"; then npm run lint; else echo "No lint script"; fi
-
+        run: if npm run | grep -q " lint"; then npm run lint; else echo "No lint script"; fi
       - name: Unit tests
-        run: |
-          if npm run | grep -q " test"; then npm test --ci --passWithNoTests=false; else echo "No test script"; fi
-
+        run: if npm run | grep -q " test"; then npm test --ci --passWithNoTests=false; else echo "No test script"; fi
       - name: E2E tests (optional)
-        run: |
-          if npm run | grep -q " e2e"; then npm run e2e; else echo "No e2e script"; fi
-
+        run: if npm run | grep -q " e2e"; then npm run e2e; else echo "No e2e script"; fi
       - name: App build
         run: npm run build
-
       - name: Build summary
         run: echo "Build & tests passed ✅" >> "$GITHUB_STEP_SUMMARY"
 
@@ -54,15 +46,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 18
           cache: 'npm'
-
       - name: Install Vercel CLI
         run: npm i -g vercel@latest
-
       - name: Decide target
         id: tgt
         run: |
@@ -71,20 +60,17 @@ jobs:
           else
             echo "target=production" >> $GITHUB_OUTPUT
           fi
-
       - name: Pull Vercel project settings
         run: |
           vercel pull --yes \
             --environment "${{ steps.tgt.outputs.target }}" \
             --token "${{ env.VERCEL_TOKEN }}" \
             --scope "${{ env.VERCEL_ORG }}"
-
       - name: Vercel prebuild
         run: |
           vercel build \
             --token "${{ env.VERCEL_TOKEN }}" \
             --scope "${{ env.VERCEL_ORG }}"
-
       - name: Deploy (prebuilt)
         id: deploy
         env:
@@ -100,13 +86,11 @@ jobs:
           URL="$(vercel "${ARGS[@]}")"
           echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "Deployed: $URL"
-
       - name: Summary
         run: |
           echo "### Deployment" >> "$GITHUB_STEP_SUMMARY"
           echo "- Target: **${{ steps.tgt.outputs.target }}**" >> "$GITHUB_STEP_SUMMARY"
           echo "- URL: ${{ steps.deploy.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
-
       - name: Post Preview URL to PR
         if: ${{ github.event_name == 'pull_request' && steps.deploy.outputs.url != '' }}
         uses: actions/github-script@v7
@@ -116,4 +100,4 @@ jobs:
               ...context.repo,
               issue_number: context.payload.pull_request.number,
               body: `✅ Preview ready: ${{ steps.deploy.outputs.url }}`
-            });
+            })
