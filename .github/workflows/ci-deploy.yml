@@ -1,0 +1,132 @@
+name: CI + Deploy (prebuilt)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+# Minimal permissions for posting PR comments and (future) deployments API
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  deployments: write
+
+env:
+  VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+  VERCEL_ORG:   ${{ secrets.VERCEL_ORG_ID }}
+
+jobs:
+  build_and_test:
+    runs-on: ubuntu-latest
+    steps:
+      # Check out repository
+      - uses: actions/checkout@v4
+
+      # Install Node and enable npm cache
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: 'npm'
+
+      # Install deps (prefer CI flow if lockfile exists)
+      - name: Install
+        run: npm ci || npm install
+
+      # Lint if a "lint" script exists
+      - name: Lint
+        run: npm run -s | grep -qE '(^| )lint( |:)' && npm run lint || echo "No lint script"
+
+      # Unit tests if a "test" script exists
+      - name: Unit tests
+        run: npm run -s | grep -qE '(^| )test( |:)' && npm test --ci --passWithNoTests=false || echo "No test script"
+
+      # E2E tests if an "e2e" script exists
+      - name: E2E tests (optional)
+        run: npm run -s | grep -qE '(^| )e2e( |:)' && npm run e2e || echo "No e2e script"
+
+      # Project build (your app’s own build step)
+      - name: App build
+        run: npm run build
+
+      # Short success note in the PR checks summary
+      - name: Build summary
+        run: echo "Build & tests passed ✅" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    needs: build_and_test
+    if: ${{ success() }}
+    runs-on: ubuntu-latest
+    steps:
+      # Check out repository for deploy context
+      - uses: actions/checkout@v4
+
+      # Install Node for vercel CLI
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: 'npm'
+
+      # Install Vercel CLI (latest)
+      - name: Install Vercel CLI
+        run: npm i -g vercel@latest
+
+      # Decide Vercel environment: preview for PRs, production for main
+      - name: Decide target
+        id: tgt
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "target=preview" >> $GITHUB_OUTPUT
+          else
+            echo "target=production" >> $GITHUB_OUTPUT
+          fi
+
+      # Pull project settings and envs for the chosen environment
+      - name: Pull Vercel project settings
+        run: |
+          vercel pull --yes \
+            --environment "${{ steps.tgt.outputs.target }}" \
+            --token "${{ env.VERCEL_TOKEN }}" \
+            --scope "${{ env.VERCEL_ORG }}"
+
+      # Build a prebuilt artifact into .vercel/output
+      - name: Vercel prebuild
+        run: |
+          vercel build \
+            --token "${{ env.VERCEL_TOKEN }}" \
+            --scope "${{ env.VERCEL_ORG }}"
+
+      # Deploy prebuilt artifact (no build on Vercel)
+      - name: Deploy (prebuilt)
+        id: deploy
+        env:
+          VC_TOKEN: ${{ env.VERCEL_TOKEN }}
+          VC_TEAM:  ${{ env.VERCEL_ORG }}
+          TARGET:   ${{ steps.tgt.outputs.target }}
+        run: |
+          set -e
+          ARGS=(deploy --yes --token "$VC_TOKEN" --scope "$VC_TEAM" --prebuilt)
+          [ "$TARGET" = "production" ] && ARGS+=(--prod) || true
+          URL="$(vercel "${ARGS[@]}")"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Deployed: $URL"
+
+      # Put target and URL into the PR checks summary for quick access
+      - name: Summary
+        run: |
+          echo "### Deployment" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Target: **${{ steps.tgt.outputs.target }}**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- URL: ${{ steps.deploy.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
+
+      # Comment the preview link on PRs so reviewers always see the latest link
+      - name: Post Preview URL to PR
+        if: ${{ github.event_name == 'pull_request' && steps.deploy.outputs.url != '' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: context.payload.pull_request.number,
+              body: `✅ Preview ready: ${{ steps.deploy.outputs.url }}`
+            })

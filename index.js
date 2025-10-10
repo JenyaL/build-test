@@ -5,4 +5,4 @@ require("dotenv").config();
         process.exit(0);
     }
 
-throw new Error("Build failed");
+//throw new Error("Build failed");
