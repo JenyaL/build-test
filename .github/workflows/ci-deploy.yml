@@ -106,40 +106,14 @@ jobs:
           echo "### Deployment" >> "$GITHUB_STEP_SUMMARY"
           echo "- Target: **${{ steps.tgt.outputs.target }}**" >> "$GITHUB_STEP_SUMMARY"
           echo "- URL: ${{ steps.deploy.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
-          
-          
-          - name: Post Preview URL to PR
-            if: ${{ github.event_name == 'pull_request' && steps.deploy.outputs.url != '' }}
-            uses: actions/github-script@v7
-            with:
-              script: |
-                const url = process.env.URL || '${{ steps.deploy.outputs.url }}';
-                const pr = context.payload.pull_request.number;
-                const commit = context.payload.pull_request.head.sha.slice(0, 7);
-                const message = `✅ **Preview ready for commit \`${commit}\`**\n🔗 ${url}`;
-                await github.rest.issues.createComment({
-                  issue_number: pr,
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  body: message
-                });
-            env:
-              URL: ${{ steps.deploy.outputs.url }}
 
       - name: Post Preview URL to PR
         if: ${{ github.event_name == 'pull_request' && steps.deploy.outputs.url != '' }}
         uses: actions/github-script@v7
         with:
           script: |
-            const url = process.env.URL || '${{ steps.deploy.outputs.url }}';
-            const pr = context.payload.pull_request.number;
-            const commit = context.payload.pull_request.head.sha.slice(0, 7);
-            const message = `✅ **Preview ready for commit \`${commit}\`**\n🔗 ${url}`;
             await github.rest.issues.createComment({
-              issue_number: pr,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: message
+              ...context.repo,
+              issue_number: context.payload.pull_request.number,
+              body: `✅ Preview ready: ${{ steps.deploy.outputs.url }}`
             });
-        env:
-          URL: ${{ steps.deploy.outputs.url }}
