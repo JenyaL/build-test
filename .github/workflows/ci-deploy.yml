@@ -30,22 +30,18 @@ jobs:
         run: |
           npm ci || npm install
 
-      # Линтер (если есть "lint" в package.json — запустится, иначе шаг пропустится)
       - name: Lint
         run: |
           if npm run | grep -q " lint"; then npm run lint; else echo "No lint script"; fi
 
-      # Юнит-тесты (если есть "test" — запустится, иначе пропуск)
       - name: Unit tests
         run: |
           if npm run | grep -q " test"; then npm test --ci --passWithNoTests=false; else echo "No test script"; fi
 
-      # E2E (опционально; с флагом пропуска, если нет сценария)
       - name: E2E tests (optional)
         run: |
           if npm run | grep -q " e2e"; then npm run e2e; else echo "No e2e script"; fi
 
-      # Локальный билд проекта (ваш обычный билдер: Next/.vite/webpack и т.д.)
       - name: App build
         run: npm run build
 
@@ -67,7 +63,6 @@ jobs:
       - name: Install Vercel CLI
         run: npm i -g vercel@latest
 
-      # Определяем окружение деплоя: preview для PR, production для пушей в main
       - name: Decide target
         id: tgt
         run: |
@@ -77,7 +72,6 @@ jobs:
             echo "target=production" >> $GITHUB_OUTPUT
           fi
 
-      # Тянем настройки проекта (создаёт .vercel/project.json)
       - name: Pull Vercel project settings
         run: |
           vercel pull --yes \
@@ -85,14 +79,12 @@ jobs:
             --token "${{ env.VERCEL_TOKEN }}" \
             --scope "${{ env.VERCEL_ORG }}"
 
-      # Собираем prebuilt артефакт в .vercel/output
       - name: Vercel prebuild
         run: |
           vercel build \
             --token "${{ env.VERCEL_TOKEN }}" \
             --scope "${{ env.VERCEL_ORG }}"
 
-      # Деплой строго из prebuilt (Vercel не билдит)
       - name: Deploy (prebuilt)
         id: deploy
         env:
