@@ -2,11 +2,10 @@ name: CI + Deploy (prebuilt)
 
 on:
   push:
-    branches: [ main ]
+    branches: [ '**' ]
   pull_request:
     branches: [ main ]
 
-# Minimal permissions for posting PR comments and (future) deployments API
 permissions:
   contents: read
   issues: write
@@ -21,36 +20,36 @@ jobs:
   build_and_test:
     runs-on: ubuntu-latest
     steps:
-      # Check out repository
+      # Checkout repo
       - uses: actions/checkout@v4
 
-      # Install Node and enable npm cache
+      # Setup Node + cache
       - uses: actions/setup-node@v4
         with:
           node-version: 18
           cache: 'npm'
 
-      # Install deps (prefer CI flow if lockfile exists)
+      # Install dependencies (CI preferred)
       - name: Install
         run: npm ci || npm install
 
-      # Lint if a "lint" script exists
+      # Lint if exists
       - name: Lint
         run: npm run -s | grep -qE '(^| )lint( |:)' && npm run lint || echo "No lint script"
 
-      # Unit tests if a "test" script exists
+      # Unit tests if exist
       - name: Unit tests
         run: npm run -s | grep -qE '(^| )test( |:)' && npm test --ci --passWithNoTests=false || echo "No test script"
 
-      # E2E tests if an "e2e" script exists
+      # E2E tests if exist
       - name: E2E tests (optional)
         run: npm run -s | grep -qE '(^| )e2e( |:)' && npm run e2e || echo "No e2e script"
 
-      # Project build (your app’s own build step)
+      # Project build
       - name: App build
         run: npm run build
 
-      # Short success note in the PR checks summary
+      # Short summary for PR checks
       - name: Build summary
         run: echo "Build & tests passed ✅" >> "$GITHUB_STEP_SUMMARY"
 
@@ -59,30 +58,32 @@ jobs:
     if: ${{ success() }}
     runs-on: ubuntu-latest
     steps:
-      # Check out repository for deploy context
+      # Checkout again for deploy context
       - uses: actions/checkout@v4
 
-      # Install Node for vercel CLI
+      # Setup Node for Vercel CLI
       - uses: actions/setup-node@v4
         with:
           node-version: 18
           cache: 'npm'
 
-      # Install Vercel CLI (latest)
+      # Install Vercel CLI
       - name: Install Vercel CLI
         run: npm i -g vercel@latest
 
-      # Decide Vercel environment: preview for PRs, production for main
+      # Decide environment target
       - name: Decide target
         id: tgt
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             echo "target=preview" >> $GITHUB_OUTPUT
-          else
+          elif [ "${{ github.ref_name }}" = "main" ]; then
             echo "target=production" >> $GITHUB_OUTPUT
+          else
+            echo "target=preview" >> $GITHUB_OUTPUT
           fi
 
-      # Pull project settings and envs for the chosen environment
+      # Pull Vercel config + envs
       - name: Pull Vercel project settings
         run: |
           vercel pull --yes \
@@ -90,14 +91,14 @@ jobs:
             --token "${{ env.VERCEL_TOKEN }}" \
             --scope "${{ env.VERCEL_ORG }}"
 
-      # Build a prebuilt artifact into .vercel/output
+      # Prebuild locally
       - name: Vercel prebuild
         run: |
           vercel build \
             --token "${{ env.VERCEL_TOKEN }}" \
             --scope "${{ env.VERCEL_ORG }}"
 
-      # Deploy prebuilt artifact (no build on Vercel)
+      # Deploy prebuilt output (skip build on Vercel)
       - name: Deploy (prebuilt)
         id: deploy
         env:
@@ -112,14 +113,14 @@ jobs:
           echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "Deployed: $URL"
 
-      # Put target and URL into the PR checks summary for quick access
+      # Show summary in job checks
       - name: Summary
         run: |
           echo "### Deployment" >> "$GITHUB_STEP_SUMMARY"
           echo "- Target: **${{ steps.tgt.outputs.target }}**" >> "$GITHUB_STEP_SUMMARY"
           echo "- URL: ${{ steps.deploy.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
 
-      # Comment the preview link on PRs so reviewers always see the latest link
+      # Comment preview link for PR reviewers
       - name: Post Preview URL to PR
         if: ${{ github.event_name == 'pull_request' && steps.deploy.outputs.url != '' }}
         uses: actions/github-script@v7
@@ -130,3 +131,25 @@ jobs:
               issue_number: context.payload.pull_request.number,
               body: `✅ Preview ready: ${{ steps.deploy.outputs.url }}`
             })
+
+      # Link deployment to merge commit (appears in PR "merged commit ..." line)
+      - name: Link deployment to merge commit
+        if: ${{ github.event_name == 'push' && steps.deploy.outputs.url != '' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const envName = '${{ github.ref_name }}';
+            const { data: dep } = await github.rest.repos.createDeployment({
+              ...context.repo,
+              ref: context.sha,
+              environment: envName,
+              auto_merge: false,
+              required_contexts: []
+            });
+            await github.rest.repos.createDeploymentStatus({
+              ...context.repo,
+              deployment_id: dep.id,
+              state: 'success',
+              environment: envName,
+              environment_url: '${{ steps.deploy.outputs.url }}'
+            });
