@@ -1,10 +1,12 @@
+Here’s your optimized YAML with short English comments only — just describing each step, no explanations or extra notes:
+
 name: CI + Deploy (prebuilt)
 
 on:
   push:
-    branches: [ '**' ]       # prod only for main; others -> preview
+    branches: ['**']       # prod only for main; others -> preview
   pull_request:
-    branches: [ main ]       # PRs into main get preview link
+    branches: [ main ]     # PRs into main get preview link
 
 permissions:
   contents: read
@@ -20,101 +22,88 @@ jobs:
   build_and_test:
     runs-on: ubuntu-latest
     steps:
-      # Checkout repo
+      # Checkout repository
       - uses: actions/checkout@v4
 
-      # Node + npm cache
+      # Setup Node.js and npm cache
       - uses: actions/setup-node@v4
         with:
           node-version: 18
-          cache: 'npm'
+          cache: npm
 
-      # Install deps
-      - name: Install
+      # Install dependencies
+      - name: Install dependencies
         run: npm ci || npm install
 
-      # Lint if script exists
-      - name: Lint
+      # Run lint
+      - name: Run lint (if exists)
         run: npm run -s | grep -qE '(^| )lint( |:)' && npm run lint || echo "No lint script"
 
-      # Unit tests if script exists
-      - name: Unit tests
+      # Run unit tests
+      - name: Run unit tests (if exists)
         run: npm run -s | grep -qE '(^| )test( |:)' && npm test --ci --passWithNoTests=false || echo "No test script"
 
-      # E2E if script exists
-      - name: E2E tests (optional)
+      # Run e2e tests
+      - name: Run e2e tests (if exists)
         run: npm run -s | grep -qE '(^| )e2e( |:)' && npm run e2e || echo "No e2e script"
 
-      # Project build
-      - name: App build
+      # Build project
+      - name: Build project
         run: npm run build
 
-      # Short build note
+      # Add build summary
       - name: Build summary
-        run: echo "Build & tests passed ✅" >> "$GITHUB_STEP_SUMMARY"
+        run: echo "✅ Build & tests passed" >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
     needs: build_and_test
-    if: ${{ success() }}
     runs-on: ubuntu-latest
+    if: ${{ success() }}
     steps:
-      # Fresh checkout for deploy context
+      # Checkout repository
       - uses: actions/checkout@v4
 
-      # Node for Vercel CLI
+      # Setup Node.js
       - uses: actions/setup-node@v4
         with:
           node-version: 18
-          cache: 'npm'
+          cache: npm
 
-      # Vercel CLI
+      # Install Vercel CLI
       - name: Install Vercel CLI
         run: npm i -g vercel@latest
 
-      # Decide env: preview for PR/branches, production for main
-      - name: Decide target
+      # Decide deploy target
+      - name: Decide deploy target
         id: tgt
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "target=preview" >> $GITHUB_OUTPUT
-          elif [ "${{ github.ref_name }}" = "main" ]; then
+          if [ "${{ github.ref_name }}" = "main" ]; then
             echo "target=production" >> $GITHUB_OUTPUT
           else
             echo "target=preview" >> $GITHUB_OUTPUT
           fi
 
-      # Pull project settings + envs
+      # Pull project settings
       - name: Pull Vercel project settings
-        run: |
-          vercel pull --yes \
-            --environment "${{ steps.tgt.outputs.target }}" \
-            --token "${{ env.VERCEL_TOKEN }}" \
-            --scope "${{ env.VERCEL_ORG }}"
+        run: vercel pull --yes --environment "${{ steps.tgt.outputs.target }}" \
+          --token "${{ env.VERCEL_TOKEN }}" --scope "${{ env.VERCEL_ORG }}"
 
-      # Build to .vercel/output (prebuilt)
-      - name: Vercel prebuild
-        run: |
-          vercel build \
-            --token "${{ env.VERCEL_TOKEN }}" \
-            --scope "${{ env.VERCEL_ORG }}"
+      # Build project output
+      - name: Build prebuilt output
+        run: vercel build --token "${{ env.VERCEL_TOKEN }}" --scope "${{ env.VERCEL_ORG }}"
 
-      # Deploy prebuilt (no build on Vercel)
-      - name: Deploy (prebuilt)
+      # Deploy prebuilt output
+      - name: Deploy prebuilt
         id: deploy
-        env:
-          VC_TOKEN: ${{ env.VERCEL_TOKEN }}
-          VC_TEAM:  ${{ env.VERCEL_ORG }}
-          TARGET:   ${{ steps.tgt.outputs.target }}
         run: |
-          set -e
-          ARGS=(deploy --yes --token "$VC_TOKEN" --scope "$VC_TEAM" --prebuilt)
-          [ "$TARGET" = "production" ] && ARGS+=(--prod) || true
-          URL="$(vercel "${ARGS[@]}")"
+          ARGS=(deploy --yes --token "${{ env.VERCEL_TOKEN }}" --scope "${{ env.VERCEL_ORG }}" --prebuilt)
+          [ "${{ steps.tgt.outputs.target }}" = "production" ] && ARGS+=(--prod)
+          URL=$(vercel "${ARGS[@]}")
           echo "url=$URL" >> "$GITHUB_OUTPUT"
-          echo "Deployed: $URL"
+          echo "✅ Deployed: $URL"
 
-      # Summary: hide prod URL, show preview URL
-      - name: Summary
+      # Add deployment summary
+      - name: Deployment summary
         run: |
           echo "### Deployment" >> "$GITHUB_STEP_SUMMARY"
           echo "- Target: **${{ steps.tgt.outputs.target }}**" >> "$GITHUB_STEP_SUMMARY"
@@ -124,8 +113,8 @@ jobs:
             echo "- URL: ${{ steps.deploy.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # PR comment with preview link
-      - name: Post Preview URL to PR
+      # Post preview comment
+      - name: Comment preview on PR
         if: ${{ github.event_name == 'pull_request' && steps.deploy.outputs.url != '' }}
         uses: actions/github-script@v7
         with:
@@ -136,9 +125,8 @@ jobs:
               body: `✅ Preview ready: ${{ steps.deploy.outputs.url }}`
             })
 
-      # GitHub Deployment card on commit:
-      # main → production (no URL); others → preview with URL
-      - name: Link deployment to commit
+      # Create GitHub deployment card
+      - name: Create GitHub Deployment
         if: ${{ github.event_name == 'push' && steps.deploy.outputs.url != '' }}
         uses: actions/github-script@v7
         with:
@@ -160,8 +148,6 @@ jobs:
               state: 'success',
               environment: envName
             };
-            if (!isProd) {
-              status.environment_url = '${{ steps.deploy.outputs.url }}';
-            }
 
+            if (!isProd) status.environment_url = '${{ steps.deploy.outputs.url }}';
             await github.rest.repos.createDeploymentStatus(status);
