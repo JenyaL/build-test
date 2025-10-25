@@ -1,0 +1,9 @@
+import React, { useMemo } from "react";
+
+export default function LargeList({ items = [] }) {
+  const rendered = useMemo(
+    () => items.map((x, i) => <li key={i}>{x}</li>),
+    []
+  );
+  return <ul>{rendered}</ul>;
+}

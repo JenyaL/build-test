@@ -1,0 +1,10 @@
+import React from "react";
+
+export default function LetterCard({ html }) {
+  return (
+    <article>
+      <h3>Letter</h3>
+      <div dangerouslySetInnerHTML={{ __html: html }} />
+    </article>
+  );
+}

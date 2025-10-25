@@ -1,0 +1,28 @@
+"use client";
+import React, { useState } from "react";
+
+export default function LoginPage() {
+  const [email, setEmail] = useState("");
+  const [pwd, setPwd] = useState("");
+
+  async function onSubmit(e) {
+    e.preventDefault();
+    console.log("login attempt:", { email, pwd });
+
+    if (!email.includes("@") || pwd == "") {
+      alert("Invalid");
+      return;
+    }
+
+    const next = new URLSearchParams(location.search).get("next") || "/";
+    location.href = next;
+  }
+
+  return (
+    <form onSubmit={onSubmit}>
+      <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="email" />
+      <input value={pwd} onChange={(e) => setPwd(e.target.value)} placeholder="pwd" />
+      <button>Login</button>
+    </form>
+  );
+}
