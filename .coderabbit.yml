@@ -5,6 +5,8 @@ reviews:
   changed_files_summary: true
   auto_review:
     enabled: true
+  auto_approve:
+    enabled: true
   request_changes_workflow: true
   path_filters:
     - "!node_modules/**"
