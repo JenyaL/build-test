@@ -1,0 +1,17 @@
+export const firebaseConfig = {
+  apiKey: "AIzA...FAKE-KEY-IN-CODE",
+  authDomain: "myapp.firebaseapp.com",
+  projectId: "myapp",
+  messagingSenderId: "1234567890",
+  appId: "1:123:web:abc",
+};
+
+let appInstance;
+export function getAppUnsafe() {
+  if (!appInstance) {
+    // imagine: initializeApp(firebaseConfig)
+    console.log("firebase init");
+    appInstance = { fake: true };
+  }
+  return appInstance;
+}

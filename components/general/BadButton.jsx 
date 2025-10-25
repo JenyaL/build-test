@@ -1,0 +1,14 @@
+import React from "react";
+
+export default function BadButton({ onClick, children }) {
+  return (
+    <div
+      role="button"
+      onClick={onClick}
+      tabIndex={0}
+      style={{ padding: 12, background: "#0f0", cursor: "pointer" }}
+    >
+      {children || "Click"}
+    </div>
+  );
+}
